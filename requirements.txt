@@ -1,0 +1,12 @@
+alembic
+networkx
+numpy
+openpyxl
+pandas
+psycopg2-binary
+python-dateutil
+python-dotenv
+pytz
+requests
+SQLAlchemy
+xlsxwriter
