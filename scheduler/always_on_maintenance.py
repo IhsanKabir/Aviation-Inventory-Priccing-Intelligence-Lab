@@ -33,6 +33,21 @@ def parse_args():
     p.add_argument("--weekly-day", choices=["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"], default="SUN")
     p.add_argument("--run-on-start", action="store_true", help="Evaluate due tasks immediately on daemon start")
     p.add_argument("--once", action="store_true", help="Run one cycle and exit")
+    p.add_argument(
+        "--enable-accumulation-recovery",
+        action="store_true",
+        default=True,
+        help="Attempt user-level accumulation recovery when pulse detects stale/interrupted runs",
+    )
+    p.add_argument(
+        "--disable-accumulation-recovery",
+        action="store_false",
+        dest="enable_accumulation_recovery",
+        help="Disable accumulation recovery checks",
+    )
+    p.add_argument("--recovery-stale-minutes", type=float, default=15.0)
+    p.add_argument("--recovery-max-idle-minutes", type=float, default=300.0)
+    p.add_argument("--recovery-cooldown-minutes", type=float, default=60.0)
     return p.parse_args()
 
 
@@ -70,6 +85,35 @@ def run_task(python_exe: str, task: str, reports_dir: str) -> int:
     return rc
 
 
+def run_accumulation_recovery(args) -> int:
+    helper = Path(__file__).resolve().parents[1] / "tools" / "recover_interrupted_accumulation.py"
+    if not helper.exists():
+        LOG.info("Accumulation recovery helper missing: %s", helper)
+        return 0
+    cmd = [
+        args.python_exe,
+        str(helper),
+        "--mode",
+        "recover",
+        "--python-exe",
+        args.python_exe,
+        "--root",
+        str(Path(__file__).resolve().parents[1]),
+        "--reports-dir",
+        args.reports_dir,
+        "--stale-minutes",
+        str(args.recovery_stale_minutes),
+        "--max-idle-minutes",
+        str(args.recovery_max_idle_minutes),
+        "--cooldown-minutes",
+        str(args.recovery_cooldown_minutes),
+    ]
+    LOG.info("Running accumulation recovery check cmd=%s", subprocess.list2cmdline(cmd))
+    rc = subprocess.run(cmd).returncode
+    LOG.info("Accumulation recovery rc=%s", rc)
+    return rc
+
+
 def current_week_key(now: dt.datetime) -> str:
     iso = now.isocalendar()
     return f"{iso.year}-W{iso.week:02d}"
@@ -87,6 +131,11 @@ def should_run_weekly(now: dt.datetime, state: dict, weekly_day: str) -> bool:
 
 def cycle(args, state: dict) -> dict:
     now = dt.datetime.now().astimezone()
+    if args.enable_accumulation_recovery:
+        rc = run_accumulation_recovery(args)
+        state["last_recovery_check_at"] = now.isoformat()
+        state["last_recovery_rc"] = rc
+
     if should_run_daily(now, state):
         rc = run_task(args.python_exe, "daily_ops", args.reports_dir)
         if rc == 0:

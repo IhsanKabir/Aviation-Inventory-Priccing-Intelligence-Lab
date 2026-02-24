@@ -34,6 +34,9 @@
 
 ## Exact Verification Commands
 
+Quick accumulation runtime verifier (scheduler + active accumulation + heartbeat freshness):
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\verify_accumulation_runtime.ps1`
+
 ```powershell
 Get-Date -Format "yyyy-MM-dd HH:mm:ss zzz"
 Get-ChildItem logs\always_on_maintenance.log,logs\maintenance_pulse.log | Select-Object Name,Length,LastWriteTime

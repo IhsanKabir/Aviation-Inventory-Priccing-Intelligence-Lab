@@ -89,6 +89,9 @@ Decision:
 
 - Perfora DB/process/storage pre-checks before probes or trainer runs.
 
+Quick accumulation runtime verifier (scheduler + active accumulation + heartbeat freshness):
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\verify_accumulation_runtime.ps1`
+
 Run:
 
 ```powershell
