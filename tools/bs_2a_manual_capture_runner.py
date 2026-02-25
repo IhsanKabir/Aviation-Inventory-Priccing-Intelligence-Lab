@@ -14,6 +14,7 @@ from urllib.request import urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CAPTURE_TOOL = REPO_ROOT / "tools" / "ttinteractive_browser_assisted_search.py"
+MANUAL_INGEST_TOOL = REPO_ROOT / "tools" / "ttinteractive_manual_ingest.py"
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 
 
@@ -136,6 +137,18 @@ def _build_run_dir(session_root: Path, args: argparse.Namespace) -> Path:
     return session_root / "runs" / label
 
 
+def _pick_ingest_python(explicit: str | None) -> Path:
+    if explicit:
+        p = Path(explicit)
+        if not p.exists():
+            raise SystemExit(f"--ingest-python not found: {p}")
+        return p
+    venv_py = REPO_ROOT / ".venv" / "Scripts" / "python.exe"
+    if venv_py.exists():
+        return venv_py
+    return Path(sys.executable)
+
+
 def _determine_success(summary: dict[str, Any] | None, capture_only: bool, tool_rc: int) -> tuple[bool, str]:
     if capture_only:
         if tool_rc == 0:
@@ -187,6 +200,53 @@ def _print_summary(summary: dict[str, Any] | None, response_path: Path, run_dir:
         print(json.dumps(mismatch, indent=2))
 
 
+def _run_auto_ingest(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    response_out: Path,
+    carrier_slug: str,
+) -> tuple[int, dict[str, Any] | None]:
+    ingest_python = _pick_ingest_python(args.ingest_python)
+    ingest_cmd: list[str] = [
+        str(ingest_python),
+        str(MANUAL_INGEST_TOOL),
+        "--summary",
+        str(response_out),
+        "--carrier",
+        args.carrier,
+    ]
+    if args.ingest_allow_mismatch:
+        ingest_cmd.append("--allow-mismatch")
+    if args.ingest_dry_run:
+        ingest_cmd.append("--dry-run")
+
+    print("")
+    print(f"[runner] Starting auto-ingest step using {ingest_python} ...")
+    if args.print_command:
+        print("[runner] Ingest command:")
+        print("  " + subprocess.list2cmdline(ingest_cmd))
+
+    proc = subprocess.run(ingest_cmd, cwd=str(REPO_ROOT))
+    ingest_manifest_path = run_dir / f"{carrier_slug}_manual_ingest_result.json"
+    ingest_manifest = _load_json(ingest_manifest_path) if ingest_manifest_path.exists() else None
+    if ingest_manifest:
+        print("")
+        print("[runner] Ingest summary")
+        print(json.dumps(
+            {
+                "dry_run": ingest_manifest.get("dry_run"),
+                "scrape_id": ingest_manifest.get("scrape_id"),
+                "rows_parsed_total": ingest_manifest.get("rows_parsed_total"),
+                "rows_valid_for_core": ingest_manifest.get("rows_valid_for_core"),
+                "rows_deduped_for_core": ingest_manifest.get("rows_deduped_for_core"),
+                "rows_inserted": ingest_manifest.get("rows_inserted"),
+            },
+            indent=2,
+        ))
+    return proc.returncode, ingest_manifest
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Operator runner for manual-assisted BS/2A TTInteractive capture via CDP attach.",
@@ -203,6 +263,10 @@ def main() -> int:
     parser.add_argument("--destination")
     parser.add_argument("--date", help="YYYY-MM-DD")
     parser.add_argument("--capture-only", action="store_true", help="Only refresh cookies/session artifacts")
+    parser.add_argument("--ingest", action="store_true", help="After successful capture, auto-run ttinteractive_manual_ingest.py for this run")
+    parser.add_argument("--ingest-dry-run", action="store_true", help="With --ingest, validate parse only and skip DB writes")
+    parser.add_argument("--ingest-allow-mismatch", action="store_true", help="With --ingest, allow parsed route/date mismatch")
+    parser.add_argument("--ingest-python", help="Python executable to use for the ingest step (default: repo .venv if present)")
     parser.add_argument("--cdp-url", default=DEFAULT_CDP_URL, help=f"DevTools endpoint (default: {DEFAULT_CDP_URL})")
     parser.add_argument("--launch-cdp-browser", action="store_true", help="Launch Chrome/Edge with remote debugging if not already running")
     parser.add_argument("--chrome-path", help="Optional Chrome/Edge executable (used for --launch-cdp-browser)")
@@ -224,9 +288,13 @@ def main() -> int:
 
     if not args.capture_only and not (args.origin and args.destination and args.date):
         parser.error("--origin, --destination, and --date are required unless --capture-only is used")
+    if args.capture_only and args.ingest:
+        parser.error("--ingest cannot be used with --capture-only")
 
     if not CAPTURE_TOOL.exists():
         raise SystemExit(f"Capture tool not found: {CAPTURE_TOOL}")
+    if args.ingest and not MANUAL_INGEST_TOOL.exists():
+        raise SystemExit(f"Manual ingest tool not found: {MANUAL_INGEST_TOOL}")
 
     session_root = Path(args.session_root)
     session_root.mkdir(parents=True, exist_ok=True)
@@ -303,6 +371,23 @@ def main() -> int:
 
     print("")
     if ok:
+        print(f"[runner] Capture step success: {reason}")
+        if args.ingest:
+            ingest_rc, ingest_manifest = _run_auto_ingest(
+                args=args,
+                run_dir=run_dir,
+                response_out=response_out,
+                carrier_slug=carrier_slug,
+            )
+            if ingest_rc != 0:
+                print(f"[runner] FAILED: auto-ingest step failed (rc={ingest_rc})")
+                return ingest_rc
+            rows_inserted = (ingest_manifest or {}).get("rows_inserted")
+            if rows_inserted is not None:
+                print(f"[runner] SUCCESS: capture + ingest completed (rows_inserted={rows_inserted})")
+            else:
+                print("[runner] SUCCESS: capture + ingest completed")
+            return 0
         print(f"[runner] SUCCESS: {reason}")
         return 0
 
