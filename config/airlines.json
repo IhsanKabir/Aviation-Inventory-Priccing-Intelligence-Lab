@@ -14,6 +14,13 @@
     "cabin_classes": ["Economy"]
   },
   {
+    "code": "BS",
+    "module": "bs",
+    "enabled": false,
+    "throttle_per_minute": 10,
+    "cabin_classes": ["Economy", "Premium Economy", "Business"]
+  },
+  {
     "code": "2A",
     "module": "airastra",
     "enabled": false,
