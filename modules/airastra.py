@@ -18,11 +18,13 @@ import copy
 import html
 import json
 import logging
+import os
 import re
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urljoin
 
 from modules.requester import Requester
+from modules.ttinteractive_flexible_html_parser import extract_flexible_fares_from_search_body
 
 
 LOG = logging.getLogger(__name__)
@@ -52,6 +54,9 @@ SEARCH_HEADERS = {
     "User-Agent": USER_AGENT,
     "X-Requested-With": "XMLHttpRequest",
 }
+
+ENV_COOKIES_PATH = "AIRASTRA_COOKIES_PATH"
+ENV_PROXY_URL = "AIRASTRA_PROXY_URL"
 
 
 def _extract_data_config(html_text: str) -> Dict[str, Any]:
@@ -170,8 +175,11 @@ def _build_search_model(
     return model
 
 
-def bootstrap_config(cookies_path: Optional[str] = None) -> Dict[str, Any]:
-    req = Requester(cookies_path=cookies_path, user_agent=USER_AGENT)
+def bootstrap_config(
+    cookies_path: Optional[str] = None,
+    proxy_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    req = Requester(cookies_path=cookies_path, user_agent=USER_AGENT, proxy_url=proxy_url)
     resp = req.get(INDEX_URL, headers=BOOTSTRAP_HEADERS)
     if resp.status_code != 200:
         raise RuntimeError(f"2A bootstrap failed status={resp.status_code}")
@@ -258,9 +266,24 @@ def _post_search(req: Requester, cfg: Dict[str, Any], model: Dict[str, Any]) -> 
     return resp.status_code, body
 
 
-def _extract_rows_if_known(_search_body: Any) -> List[Dict[str, Any]]:
-    # TODO: Implement TTInteractive SearchFlights parser after anti-bot access is solved.
-    return []
+def _extract_rows_if_known(
+    search_body: Any,
+    *,
+    cfg: Optional[Dict[str, Any]],
+    cabin: str,
+    adt: int,
+    chd: int,
+    inf: int,
+) -> List[Dict[str, Any]]:
+    return extract_flexible_fares_from_search_body(
+        search_body,
+        config=cfg,
+        airline_code="2A",
+        requested_cabin=cabin,
+        adt=adt,
+        chd=chd,
+        inf=inf,
+    )
 
 
 def airastra_search(
@@ -272,9 +295,15 @@ def airastra_search(
     chd: int = 0,
     inf: int = 0,
     cookies_path: Optional[str] = None,
+    proxy_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     output: Dict[str, Any] = {"raw": {}, "originalResponse": None, "rows": [], "ok": False}
-    req = Requester(cookies_path=cookies_path, user_agent=USER_AGENT)
+    req = Requester(cookies_path=cookies_path, user_agent=USER_AGENT, proxy_url=proxy_url)
+    if cookies_path or proxy_url:
+        output["raw"]["access_path"] = {
+            "cookies_path": cookies_path,
+            "proxy_url": proxy_url,
+        }
 
     try:
         bootstrap_resp = req.get(INDEX_URL, headers=BOOTSTRAP_HEADERS)
@@ -340,16 +369,25 @@ def airastra_search(
         output["raw"]["error"] = "datadome_blocked"
         output["raw"]["hint"] = (
             "Air Astra TTInteractive search is protected by DataDome. "
-            "Automated requests are blocked in this environment."
+            "Automated requests are blocked in this environment. "
+            "Use tools/ttinteractive_browser_assisted_search.py to capture cookies, then set "
+            "AIRASTRA_COOKIES_PATH and optionally AIRASTRA_PROXY_URL."
         )
         return output
 
     output["ok"] = status_code == 200
     if status_code == 200:
         output["originalResponse"] = body if isinstance(body, dict) else None
-        output["rows"] = _extract_rows_if_known(body)
+        output["rows"] = _extract_rows_if_known(
+            body,
+            cfg=cfg,
+            cabin=cabin,
+            adt=adt,
+            chd=chd,
+            inf=inf,
+        )
         if not output["rows"]:
-            LOG.info("[2A] Search response received but parser is not implemented yet")
+            LOG.info("[2A] Search response received but no TTInteractive fare rows were found")
     return output
 
 
@@ -366,6 +404,8 @@ def fetch_flights(
     Unified contract for run_all.py:
     { raw, originalResponse, rows, ok }
     """
+    cookies_path = os.getenv(ENV_COOKIES_PATH) or None
+    proxy_url = os.getenv(ENV_PROXY_URL) or None
     return airastra_search(
         origin=origin,
         dest=destination,
@@ -374,6 +414,8 @@ def fetch_flights(
         adt=adt,
         chd=chd,
         inf=inf,
+        cookies_path=cookies_path,
+        proxy_url=proxy_url,
     )
 
 
@@ -389,6 +431,8 @@ def cli_main():
     parser.add_argument("--discover-routes", action="store_true")
     parser.add_argument("--domestic-only", action="store_true")
     parser.add_argument("--origin-filter", action="append", default=[])
+    parser.add_argument("--cookies-path", help=f"Cookie JSON path (Requester-compatible dict) or use {ENV_COOKIES_PATH}")
+    parser.add_argument("--proxy-url", help=f"Proxy URL (e.g. http://host:port) or use {ENV_PROXY_URL}")
     args = parser.parse_args()
 
     if args.discover_routes:
@@ -402,6 +446,8 @@ def cli_main():
     if not (args.origin and args.destination and args.date):
         parser.error("--origin, --destination, and --date are required unless --discover-routes is used")
 
+    cookies_path = args.cookies_path or os.getenv(ENV_COOKIES_PATH) or None
+    proxy_url = args.proxy_url or os.getenv(ENV_PROXY_URL) or None
     out = airastra_search(
         origin=args.origin,
         dest=args.destination,
@@ -410,6 +456,8 @@ def cli_main():
         adt=args.adt,
         chd=args.chd,
         inf=args.inf,
+        cookies_path=cookies_path,
+        proxy_url=proxy_url,
     )
     print(json.dumps(out, indent=2, ensure_ascii=False, default=str))
 
