@@ -1,5 +1,6 @@
 import argparse
 import logging
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -19,6 +20,18 @@ from engines.route_scope import (
 from engines.scrape_context import ScrapeContext
 
 LOG = logging.getLogger("route_flight_fare_monitor")
+
+
+def _normalize_airline_codes(codes):
+    out = []
+    seen = set()
+    for code in codes or []:
+        c = str(code or "").strip().upper()
+        if not c or c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+    return out
 
 
 def _dominant_scrape_passenger_mix(engine, scrape_id: str):
@@ -48,6 +61,150 @@ def _dominant_scrape_passenger_mix(engine, scrape_id: str):
         "inf": int(row[2] or 0),
         "rows": int(row[3] or 0),
     }
+
+
+def _scrape_airline_stats(engine, scrape_id, airline_codes=None):
+    airline_codes = _normalize_airline_codes(airline_codes)
+    airline_where = ""
+    params = {"scrape_id": str(scrape_id)}
+    if airline_codes:
+        airline_where = " AND fo.airline = ANY(:airline_codes)"
+        params["airline_codes"] = airline_codes
+
+    q = text(
+        f"""
+        SELECT
+            fo.airline,
+            COUNT(*) AS row_count,
+            COUNT(DISTINCT fo.origin || '->' || fo.destination) AS route_count
+        FROM flight_offers fo
+        WHERE fo.scrape_id = :scrape_id
+          {airline_where}
+        GROUP BY fo.airline
+        """
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(q, params).mappings().all()
+    return {
+        str(r["airline"]).upper(): {
+            "row_count": int(r["row_count"] or 0),
+            "route_count": int(r["route_count"] or 0),
+        }
+        for r in rows
+    }
+
+
+def _recent_airline_max_stats(engine, lookback=200, airline_codes=None):
+    airline_codes = _normalize_airline_codes(airline_codes)
+    airline_filter = ""
+    params = {"lookback": int(max(2, lookback))}
+    if airline_codes:
+        airline_filter = "WHERE airline = ANY(:airline_codes)"
+        params["airline_codes"] = airline_codes
+
+    q = text(
+        f"""
+        WITH recent_scrapes AS (
+            SELECT scrape_id
+            FROM flight_offers
+            GROUP BY scrape_id
+            ORDER BY MAX(scraped_at) DESC
+            LIMIT :lookback
+        ),
+        per_scrape_airline AS (
+            SELECT
+                fo.scrape_id,
+                fo.airline,
+                COUNT(*) AS row_count,
+                COUNT(DISTINCT fo.origin || '->' || fo.destination) AS route_count
+            FROM flight_offers fo
+            JOIN recent_scrapes rs
+              ON rs.scrape_id = fo.scrape_id
+            {airline_filter}
+            GROUP BY fo.scrape_id, fo.airline
+        )
+        SELECT
+            airline,
+            MAX(row_count) AS max_row_count,
+            MAX(route_count) AS max_route_count
+        FROM per_scrape_airline
+        GROUP BY airline
+        """
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(q, params).mappings().all()
+    return {
+        str(r["airline"]).upper(): {
+            "max_row_count": int(r["max_row_count"] or 0),
+            "max_route_count": int(r["max_route_count"] or 0),
+        }
+        for r in rows
+    }
+
+
+def _warn_if_partial_scrape_selection(
+    engine,
+    *,
+    current_scrape,
+    previous_scrape,
+    airline_codes=None,
+    scrape_lookback=40,
+    min_full_scrape_rows=100,
+    min_full_ratio=0.30,
+):
+    airline_codes = _normalize_airline_codes(airline_codes)
+    baseline = _recent_airline_max_stats(
+        engine,
+        lookback=max(int(scrape_lookback or 0), 200),
+        airline_codes=airline_codes,
+    )
+    if not baseline:
+        return
+
+    current_stats = _scrape_airline_stats(engine, current_scrape, airline_codes=airline_codes)
+    previous_stats = _scrape_airline_stats(engine, previous_scrape, airline_codes=airline_codes)
+    target_airlines = airline_codes or sorted(baseline.keys())
+
+    floor = int(min_full_scrape_rows or 0)
+    ratio = float(min_full_ratio or 0.0)
+
+    def _thresholds(max_rows, max_routes):
+        row_threshold = 1
+        route_threshold = 1
+        if max_rows > 0:
+            row_threshold = min(max_rows, max(floor, int(max_rows * ratio)))
+        if max_routes > 0:
+            route_threshold = min(max_routes, max(1, int(math.ceil(max_routes * ratio))))
+        return int(row_threshold), int(route_threshold)
+
+    for label, scrape_id, stats in (
+        ("current", current_scrape, current_stats),
+        ("previous", previous_scrape, previous_stats),
+    ):
+        for airline_code in target_airlines:
+            base = baseline.get(airline_code)
+            if not base:
+                continue
+            max_rows = int(base.get("max_row_count") or 0)
+            max_routes = int(base.get("max_route_count") or 0)
+            row_threshold, route_threshold = _thresholds(max_rows, max_routes)
+            s = stats.get(airline_code, {})
+            rows_now = int(s.get("row_count") or 0)
+            routes_now = int(s.get("route_count") or 0)
+            if rows_now < row_threshold or routes_now < route_threshold:
+                LOG.warning(
+                    "Selected %s scrape appears partial for airline %s: scrape_id=%s "
+                    "rows=%d (threshold=%d, max_recent=%d) routes=%d (threshold=%d, max_recent=%d).",
+                    label,
+                    airline_code,
+                    scrape_id,
+                    rows_now,
+                    row_threshold,
+                    max_rows,
+                    routes_now,
+                    route_threshold,
+                    max_routes,
+                )
 
 
 def _build_run_stamp(timestamp_tz: str):
@@ -197,6 +354,15 @@ def generate_route_flight_fare_monitor(
                 current_mix,
                 previous_mix,
             )
+    _warn_if_partial_scrape_selection(
+        engine,
+        current_scrape=current_scrape,
+        previous_scrape=previous_scrape,
+        airline_codes=selection_airline_codes,
+        scrape_lookback=scrape_lookback,
+        min_full_scrape_rows=min_full_scrape_rows,
+        min_full_ratio=min_full_ratio,
+    )
 
     cmp_engine = ComparisonEngine(engine)
     comparison_df = cmp_engine.compare_scrapes(
