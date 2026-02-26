@@ -26,5 +26,12 @@
     "enabled": false,
     "throttle_per_minute": 10,
     "cabin_classes": ["Economy"]
+  },
+  {
+    "code": "Q2",
+    "module": "maldivian",
+    "enabled": false,
+    "throttle_per_minute": 5,
+    "cabin_classes": ["Economy"]
   }
 ]
