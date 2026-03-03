@@ -385,7 +385,11 @@ class OutputWriter:
             "Inv Press = 100 x (1 - min(1, Open/Cap)); proxy only, not exact load.\n"
             "Compare only runs with same passenger mix (ADT/CHD/INF)."
         )
-        sheet.merge_range(start_row + 1, start_col, start_row + 9, start_col + 4, note, fmt_box)
+        # Avoid tall merged regions on the main monitor sheet because row hide/show
+        # operations used by interactive XLSM filtering fail on merged-row intersections.
+        sheet.write(start_row + 1, start_col, note, fmt_box)
+        sheet.set_column(start_col, start_col + 4, 24)
+        sheet.set_row(start_row + 1, 112)
 
     def _write_changes_summary(self, workbook, df: pd.DataFrame):
         sheet = workbook.add_worksheet("What Changed Since Last Run")
