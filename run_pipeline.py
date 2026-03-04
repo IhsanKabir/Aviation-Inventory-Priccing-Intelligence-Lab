@@ -53,6 +53,12 @@ def parse_args():
     parser.add_argument("--limit-routes", type=int)
     parser.add_argument("--limit-dates", type=int)
     parser.add_argument("--parallel-airlines", type=int, default=1, help="Run one run_all process per airline in parallel when airline filter is not set")
+    parser.add_argument(
+        "--query-timeout-seconds",
+        type=float,
+        default=120.0,
+        help="Soft timeout per search query passed to run_all (default: 120s).",
+    )
     parser.add_argument("--profile-runtime", action="store_true", help="Enable runtime profiling output from run_all")
     parser.add_argument(
         "--skip-scrape",
@@ -119,6 +125,8 @@ def parse_args():
     parser.add_argument("--prediction-dl-quantiles", default="0.1,0.5,0.9")
     parser.add_argument("--prediction-dl-min-history", type=int, default=8)
     parser.add_argument("--prediction-dl-random-seed", type=int, default=42)
+    parser.add_argument("--prediction-backtest-selection-metric", choices=["mae", "rmse"], default="mae")
+    parser.add_argument("--prediction-backtest-model-min-coverage-ratio", type=float, default=0.8)
 
     # unified intelligence hub
     parser.add_argument("--run-intelligence-hub", action="store_true")
@@ -255,21 +263,27 @@ def _load_dates_from_file_pipeline(path: Path, today: dt.date) -> list[str]:
 
 
 def _load_schedule_date_defaults(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        obj = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        LOG.warning("Failed to parse schedule file %s for date defaults: %s", path, exc)
-        return {}
-    if not isinstance(obj, dict):
+    obj = _load_schedule_file_obj(path)
+    if not obj:
         return {}
     root = obj.get("auto_run_date_ranges")
     return root if isinstance(root, dict) else {}
 
 
+def _load_schedule_file_obj(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        LOG.warning("Failed to parse schedule file %s: %s", path, exc)
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
 def _apply_schedule_date_defaults_pipeline(args) -> None:
-    root = _load_schedule_date_defaults(Path(args.schedule_file))
+    schedule_obj = _load_schedule_file_obj(Path(args.schedule_file))
+    root = schedule_obj.get("auto_run_date_ranges") if isinstance(schedule_obj.get("auto_run_date_ranges"), dict) else {}
     if not root:
         return
 
@@ -383,6 +397,17 @@ def _apply_schedule_date_defaults_pipeline(args) -> None:
         args.prediction_departure_end_date = str(pred_dep_end)
         applied.append(f"prediction_departure_end_date={args.prediction_departure_end_date}")
 
+    # Optional default parallelism from schedule root-level concurrency.
+    # Applies only when caller did not pin a specific airline and did not request custom worker count (>1).
+    try:
+        schedule_concurrency = int(schedule_obj.get("concurrency") or 0)
+    except Exception:
+        schedule_concurrency = 0
+    if not args.airline and int(args.parallel_airlines or 1) <= 1 and schedule_concurrency > 1:
+        # Keep conservative cap to reduce antibot/rate-limit pressure.
+        args.parallel_airlines = max(1, min(3, schedule_concurrency))
+        applied.append(f"parallel_airlines={args.parallel_airlines} (from schedule.concurrency={schedule_concurrency})")
+
     if applied:
         LOG.info("Applied auto-run date defaults from %s: %s", args.schedule_file, ", ".join(applied))
 
@@ -440,7 +465,47 @@ def _collect_observed_airline_row_counts(combined_csv: Path) -> dict:
     return counts
 
 
-def _compute_all_airline_coverage(plan: dict) -> dict:
+def _read_latest_cycle_id(status_path: Path = Path("output/reports/run_all_status_latest.json")) -> str | None:
+    if not status_path.exists():
+        return None
+    try:
+        obj = json.loads(status_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    sid = str(obj.get("cycle_id") or obj.get("scrape_id") or "").strip()
+    return sid or None
+
+
+def _collect_observed_airline_row_counts_db(*, db_url: str, cycle_id: str | None) -> dict:
+    if not cycle_id:
+        return {}
+    try:
+        engine = create_engine(db_url, pool_pre_ping=True, future=True)
+        sql = text(
+            """
+            SELECT UPPER(COALESCE(airline, '')) AS airline, COUNT(*) AS row_count
+            FROM flight_offers
+            WHERE scrape_id::text = :cycle_id
+            GROUP BY UPPER(COALESCE(airline, ''))
+            """
+        )
+        with engine.connect() as conn:
+            rows = conn.execute(sql, {"cycle_id": str(cycle_id)}).fetchall()
+        out = {}
+        for airline, row_count in rows:
+            a = str(airline or "").strip().upper()
+            if not a:
+                continue
+            out[a] = int(row_count or 0)
+        return out
+    except Exception as exc:
+        LOG.warning("Failed to compute observed airline counts from DB cycle_id=%s: %s", cycle_id, exc)
+        return {}
+
+
+def _compute_all_airline_coverage(plan: dict, *, db_url: str) -> dict:
     gate = plan.get("coverage_gate") if isinstance(plan.get("coverage_gate"), dict) else {}
     enabled = bool(gate.get("enabled"))
 
@@ -456,7 +521,12 @@ def _compute_all_airline_coverage(plan: dict) -> dict:
     min_rows = max(1, min_rows)
 
     expected = _collect_expected_airlines_from_routes(routes_file)
-    observed_counts = _collect_observed_airline_row_counts(Path("output/latest/combined_results.csv"))
+    cycle_id = _read_latest_cycle_id()
+    observed_counts = _collect_observed_airline_row_counts_db(db_url=db_url, cycle_id=cycle_id)
+    observed_source = "db_cycle"
+    if not observed_counts:
+        observed_counts = _collect_observed_airline_row_counts(Path("output/latest/combined_results.csv"))
+        observed_source = "combined_csv"
 
     covered = []
     missing = []
@@ -476,6 +546,8 @@ def _compute_all_airline_coverage(plan: dict) -> dict:
         "minimum_rows_per_airline": min_rows,
         "expected_airlines": expected,
         "observed_row_counts": observed_counts,
+        "observed_source": observed_source,
+        "cycle_id": cycle_id,
         "covered_airlines": covered,
         "missing_airlines": missing,
         "coverage_pct": coverage_pct,
@@ -586,7 +658,18 @@ def _resolve_route_audit_report_path(report_output_dir: str) -> Path:
     return candidates[0]
 
 
-def _log_per_airline_row_counts(report_output_dir: str) -> None:
+def _log_per_airline_row_counts(report_output_dir: str, *, db_url: str | None = None) -> None:
+    cycle_id = _read_latest_cycle_id()
+    if db_url and cycle_id:
+        db_counts = _collect_observed_airline_row_counts_db(db_url=db_url, cycle_id=cycle_id)
+        if db_counts:
+            LOG.info(
+                "accumulation_rows_by_airline source=db_cycle cycle_id=%s %s",
+                cycle_id,
+                ", ".join(f"{k}={v}" for k, v in sorted(db_counts.items())),
+            )
+            return
+
     # 1) Accumulation-level rows from output/latest/combined_results.csv
     combined_csv = Path("output/latest/combined_results.csv")
     if combined_csv.exists():
@@ -752,6 +835,7 @@ def build_scrape_cmd(args):
             cmd.append("--strict-route-audit")
         _add_arg(cmd, "--limit-routes", args.limit_routes)
         _add_arg(cmd, "--limit-dates", args.limit_dates)
+        _add_arg(cmd, "--query-timeout-seconds", args.query_timeout_seconds)
         return cmd
 
     cmd = [args.python_exe, str(REPO_ROOT / "run_all.py")]
@@ -778,6 +862,7 @@ def build_scrape_cmd(args):
         cmd.append("--strict-route-audit")
     _add_arg(cmd, "--limit-routes", args.limit_routes)
     _add_arg(cmd, "--limit-dates", args.limit_dates)
+    _add_arg(cmd, "--query-timeout-seconds", args.query_timeout_seconds)
     if args.profile_runtime:
         cmd.append("--profile-runtime")
         _add_arg(cmd, "--profile-output-dir", args.report_output_dir)
@@ -839,6 +924,8 @@ def build_prediction_cmd(args):
     _add_arg(cmd, "--dl-quantiles", args.prediction_dl_quantiles)
     _add_arg(cmd, "--dl-min-history", args.prediction_dl_min_history)
     _add_arg(cmd, "--dl-random-seed", args.prediction_dl_random_seed)
+    _add_arg(cmd, "--backtest-selection-metric", args.prediction_backtest_selection_metric)
+    _add_arg(cmd, "--backtest-model-min-coverage-ratio", args.prediction_backtest_model_min_coverage_ratio)
     if args.prediction_disable_backtest:
         cmd.append("--disable-backtest")
     return cmd
@@ -960,8 +1047,8 @@ def main():
         LOG.info("column_change_events before=%s after=%s delta=%s", before_count, after_count, after_count - before_count)
 
     route_audit_path = _resolve_route_audit_report_path(args.report_output_dir)
-    _log_per_airline_row_counts(args.report_output_dir)
-    coverage = _compute_all_airline_coverage(execution_plan)
+    _log_per_airline_row_counts(args.report_output_dir, db_url=args.db_url)
+    coverage = _compute_all_airline_coverage(execution_plan, db_url=args.db_url)
     if execution_plan and coverage.get("enabled"):
         LOG.info(
             "all_airline_coverage expected=%d covered=%d missing=%d pct=%.2f pass=%s",

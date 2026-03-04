@@ -97,6 +97,10 @@ def parse_args():
     parser.add_argument("--date-end", help="Inclusive range end date (YYYY-MM-DD)")
     parser.add_argument("--dates", help="Comma-separated departure dates in YYYY-MM-DD format")
     parser.add_argument("--date-offsets", help="Comma-separated day offsets from today, e.g. 0,3,7,30")
+    parser.add_argument(
+        "--cycle-id",
+        help="Optional shared cycle UUID. Use this to group parallel airline runs into one comparable snapshot cycle.",
+    )
     parser.add_argument("--dates-file", default="config/dates.json", help="Optional JSON file for dynamic date settings")
     parser.add_argument("--schedule-file", default=str(SCHEDULE_FILE), help="Optional scheduler config file for auto-run date defaults")
     parser.add_argument("--cabin", help="Filter to a single cabin name (e.g., Economy)")
@@ -810,7 +814,7 @@ def write_route_audit_report(*, route_audit: Dict[str, Any], airlines_enabled: D
 def _heartbeat_paths(scrape_id) -> tuple[Path, Path]:
     ts_local = datetime.datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
     latest = RUN_STATUS_OUTPUT_DIR / "run_all_status_latest.json"
-    run = RUN_STATUS_OUTPUT_DIR / f"run_all_status_{ts_local}_{scrape_id}.json"
+    run = RUN_STATUS_OUTPUT_DIR / f"run_all_status_{ts_local}_{scrape_id}_{os.getpid()}.json"
     return latest, run
 
 
@@ -821,6 +825,8 @@ def _write_run_status(status: Dict[str, Any], *, latest_path: Path, run_path: Pa
         # Compatibility aliases for terminology migration (non-breaking).
         if payload.get("scrape_id") and not payload.get("accumulation_run_id"):
             payload["accumulation_run_id"] = payload.get("scrape_id")
+        if payload.get("scrape_id") and not payload.get("cycle_id"):
+            payload["cycle_id"] = payload.get("scrape_id")
         if payload.get("started_at_utc") and not payload.get("accumulation_started_at_utc"):
             payload["accumulation_started_at_utc"] = payload.get("started_at_utc")
         if payload.get("last_query_at_utc") and not payload.get("accumulation_last_query_at_utc"):
@@ -1086,7 +1092,14 @@ def main():
     args.chd = max(0, int(args.chd or 0))
     args.inf = max(0, int(args.inf or 0))
     _apply_schedule_date_defaults_run_all(args)
-    scrape_id = uuid.uuid4()
+    scrape_id = None
+    if args.cycle_id:
+        try:
+            scrape_id = uuid.UUID(str(args.cycle_id).strip())
+        except Exception:
+            raise SystemExit(f"Invalid --cycle-id (must be UUID): {args.cycle_id}")
+    if scrape_id is None:
+        scrape_id = uuid.uuid4()
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     scraped_at = now_utc.replace(tzinfo=None)
     init_db(create_tables=True)
@@ -1106,6 +1119,7 @@ def main():
         "state": "starting",
         "pid": os.getpid(),
         "scrape_id": str(scrape_id),
+        "cycle_id": str(scrape_id),
         "accumulation_run_id": str(scrape_id),
         "started_at_utc": now_utc.isoformat(),
         "accumulation_started_at_utc": now_utc.isoformat(),

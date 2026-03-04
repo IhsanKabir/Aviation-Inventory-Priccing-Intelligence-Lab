@@ -211,6 +211,19 @@ Check outputs:
 - `output/reports/runtime_profile_latest.json`
 - `output/reports/scrape_parallel_latest.json`
 
+Cycle-based parallel run (explicit shared snapshot id + timeout guard):
+
+```powershell
+$cycle = [guid]::NewGuid().ToString()
+.\.venv\Scripts\python.exe tools\parallel_airline_runner.py --python-exe .\.venv\Scripts\python.exe --max-workers 2 --cycle-id $cycle --query-timeout-seconds 120 --quick --limit-routes 1 --limit-dates 1 --output-dir output\reports
+Get-Content output\reports\scrape_parallel_latest.json | findstr /I cycle_id
+```
+
+Notes:
+- `cycle_id` groups all airline worker runs into one comparable snapshot cycle.
+- `run_pipeline.py` coverage checks prefer DB rows by `cycle_id` (fallback: `combined_results.csv`).
+- Start with `--max-workers 2`; increase only after stable anti-bot/rate-limit behavior.
+
 ## Passenger-Mix Basis (ADT/CHD/INF) Checks
 
 Rule:

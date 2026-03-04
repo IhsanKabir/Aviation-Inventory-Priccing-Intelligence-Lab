@@ -8,6 +8,7 @@ import argparse
 import json
 import subprocess
 import sys
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +21,7 @@ def parse_args():
     p.add_argument("--python-exe", default=sys.executable)
     p.add_argument("--airlines-config", default="config/airlines.json")
     p.add_argument("--max-workers", type=int, default=2)
+    p.add_argument("--cycle-id", help="Optional shared cycle UUID for all airline worker processes")
     p.add_argument("--origin")
     p.add_argument("--destination")
     p.add_argument("--date")
@@ -37,6 +39,7 @@ def parse_args():
     p.add_argument("--route-scope", choices=["all", "domestic", "international"])
     p.add_argument("--market-country")
     p.add_argument("--strict-route-audit", action="store_true")
+    p.add_argument("--query-timeout-seconds", type=float)
     p.add_argument("--quick", action="store_true")
     p.add_argument("--limit-routes", type=int)
     p.add_argument("--limit-dates", type=int)
@@ -48,12 +51,14 @@ def parse_args():
 def _load_enabled_airlines(path: Path):
     if not path.exists():
         return []
-    data = json.loads(path.read_text(encoding="utf-8"))
+    # Use utf-8-sig so Windows-edited JSON files with BOM are accepted.
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
     return [str(x.get("code", "")).upper() for x in data if x.get("enabled")]
 
 
-def _build_cmd(args, airline: str):
+def _build_cmd(args, airline: str, cycle_id: str):
     cmd = [args.python_exe, str(REPO_ROOT / "run_all.py"), "--airline", airline]
+    cmd.extend(["--cycle-id", str(cycle_id)])
     if args.quick:
         cmd.append("--quick")
     for flag, value in [
@@ -75,6 +80,7 @@ def _build_cmd(args, airline: str):
         ("--market-country", args.market_country),
         ("--limit-routes", args.limit_routes),
         ("--limit-dates", args.limit_dates),
+        ("--query-timeout-seconds", args.query_timeout_seconds),
     ]:
         if value is not None:
             cmd.extend([flag, str(value)])
@@ -99,24 +105,35 @@ def _run_one(cmd: list[str], airline: str):
 
 def main():
     args = parse_args()
+    cycle_id = str(args.cycle_id).strip() if args.cycle_id else str(uuid.uuid4())
+    try:
+        cycle_id = str(uuid.UUID(cycle_id))
+    except Exception:
+        raise SystemExit(f"Invalid --cycle-id (must be UUID): {cycle_id}")
     airlines = _load_enabled_airlines(Path(args.airlines_config))
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now().astimezone().strftime("%Y%m%d_%H%M%S")
+    started = datetime.now(timezone.utc)
 
     results = []
     with ThreadPoolExecutor(max_workers=max(1, args.max_workers)) as ex:
         fut_map = {}
         for a in airlines:
-            cmd = _build_cmd(args, a)
+            cmd = _build_cmd(args, a, cycle_id=cycle_id)
             fut_map[ex.submit(_run_one, cmd, a)] = a
         for fut in as_completed(fut_map):
             results.append(fut.result())
 
     results = sorted(results, key=lambda x: x["airline"])
     failed = [r for r in results if r["rc"] != 0]
+    ended = datetime.now(timezone.utc)
     payload = {
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": ended.isoformat(),
+        "started_at_utc": started.isoformat(),
+        "completed_at_utc": ended.isoformat(),
+        "duration_sec": float((ended - started).total_seconds()),
+        "cycle_id": cycle_id,
         "airline_count": len(airlines),
         "max_workers": args.max_workers,
         "failed_count": len(failed),
@@ -124,11 +141,11 @@ def main():
     }
 
     latest = out_dir / "scrape_parallel_latest.json"
-    run = out_dir / f"scrape_parallel_{ts}.json"
+    run = out_dir / f"scrape_parallel_{ts}_{cycle_id}.json"
     latest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     run.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
-    print(f"parallel_scrape_done airlines={len(airlines)} failed={len(failed)}")
+    print(f"parallel_scrape_done airlines={len(airlines)} failed={len(failed)} cycle_id={cycle_id}")
     print(f"latest={latest}")
     print(f"run={run}")
     if args.strict and failed:

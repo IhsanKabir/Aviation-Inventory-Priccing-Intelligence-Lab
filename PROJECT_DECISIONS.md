@@ -3,7 +3,7 @@
 _Current implemented intelligence stack: Inventory-State Modeling + Passenger-Size Probe Analysis + Two-Stage Route-Gated Forecasting + optional ML (`catboost`,`lightgbm`) + optional DL (`mlp`) quantile forecasting (rolling-viability-gated route selection)._  
 _Planned advanced DL path (exact methods): TCN (first), TFT (later), survival/hazard models for event timing, and network-aware models in later phases._
 
-Last updated: 2026-03-02
+Last updated: 2026-03-04
 
 ## 0) Current Operating Clarifications (2026-03-02)
 
@@ -37,6 +37,35 @@ Last updated: 2026-03-02
   - Dedicated two-scrape comparison workbook at route/flight/fare level.
   - Focuses on current-vs-previous scrape deltas, seat/fare movement, and exception flags.
   - Includes guardrails for tiny/partial scrapes and warns on passenger-mix mismatch between compared scrapes.
+
+### Cycle-Based Snapshot Integrity (2026-03-04)
+
+- Pipeline is now cycle-based for parallel accumulation:
+  - `tools/parallel_airline_runner.py` generates one shared `cycle_id` UUID for all airline worker processes in that run.
+  - Each worker calls `run_all.py --cycle-id <shared_uuid>`, so all rows from that parallel batch are grouped into one comparable snapshot cycle.
+- `run_all.py` now persists cycle identity in status heartbeats:
+  - `scrape_id` (existing key) + `cycle_id` (explicit key).
+  - Backward compatibility is preserved by aliasing `cycle_id` to `scrape_id` when needed.
+- Coverage and accumulation counts in `run_pipeline.py` now prefer DB cycle reads:
+  - Reads latest `cycle_id` from `output/reports/run_all_status_latest.json`.
+  - Computes per-airline row counts from `flight_offers` filtered by that `cycle_id`.
+  - Falls back to `output/latest/combined_results.csv` only if cycle-level DB counts are unavailable.
+- Decision impact:
+  - Previous-vs-current comparisons remain consistent even when airlines are scraped in parallel shards, because the shard outputs belong to one shared cycle.
+
+### Search-Time Reduction Measures (2026-03-04)
+
+- Controlled parallelization at pipeline layer:
+  - `run_pipeline.py` supports `--parallel-airlines N`.
+  - If not explicitly set, scheduler `concurrency` can auto-set parallel workers (conservative cap: 3).
+- Query-level timeout control:
+  - `run_pipeline.py --query-timeout-seconds` passes through to `run_all.py` (and parallel runner).
+  - Timed-out queries are treated as soft-fail skips to keep cycles moving.
+- Runtime bottleneck visibility:
+  - `run_all.py --profile-runtime` writes `runtime_profile_latest.json` with slowest routes and per-airline averages.
+- Guardrail policy:
+  - Keep worker count conservative under anti-bot/rate-limit pressure.
+  - Increase workers only after observing stable success and acceptable coverage for several consecutive cycles.
 
 ### Penalty Data (BG + OTA)
 
