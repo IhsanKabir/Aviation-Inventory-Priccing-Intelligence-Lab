@@ -131,7 +131,7 @@ export default async function HomePage() {
                 <div>
                   <strong>{item.route_key}</strong>
                   <span>
-                    {item.origin} → {item.destination}
+                    {item.origin} {"->"} {item.destination}
                   </span>
                 </div>
                 <div className="pill good">
@@ -146,3 +146,5 @@ export default async function HomePage() {
     </>
   );
 }
+
+

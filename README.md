@@ -18,34 +18,34 @@ Current implemented scope:
 
 Core project decisions and operating policy live in:
 
-- [PROJECT_DECISIONS.md](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/PROJECT_DECISIONS.md)
-- [OPERATIONS_RUNBOOK.md](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/OPERATIONS_RUNBOOK.md)
-- [docs/WEB_PLATFORM_PLAN.md](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/docs/WEB_PLATFORM_PLAN.md)
-- [warehouse/bigquery/README.md](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/warehouse/bigquery/README.md)
+- [PROJECT_DECISIONS.md](PROJECT_DECISIONS.md)
+- [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md)
+- [docs/WEB_PLATFORM_PLAN.md](docs/WEB_PLATFORM_PLAN.md)
+- [warehouse/bigquery/README.md](warehouse/bigquery/README.md)
 
 ## Main Entry Points
 
-- [run_pipeline.py](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/run_pipeline.py)
+- [run_pipeline.py](run_pipeline.py)
   End-to-end accumulation + reports + optional prediction/intelligence steps.
 
-- [run_all.py](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/run_all.py)
-  Core source-capture, normalization, and persistence runner.
+- [run_all.py](run_all.py)
+  Core collection, normalization, and persistence runner.
 
-- [generate_reports.py](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/generate_reports.py)
+- [generate_reports.py](generate_reports.py)
   Standard reporting pack generator.
 
-- [generate_route_flight_fare_monitor.py](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/generate_route_flight_fare_monitor.py)
+- [generate_route_flight_fare_monitor.py](generate_route_flight_fare_monitor.py)
   Dedicated route-flight fare monitor workbook, including macro-enabled `.xlsm` export.
 
-- [predict_next_day.py](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/predict_next_day.py)
+- [predict_next_day.py](predict_next_day.py)
   Forecasting layer for event and numeric target prediction.
 
-- [apps/api/README.md](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/apps/api/README.md)
+- [apps/api/README.md](apps/api/README.md)
   Reporting API scaffold on top of PostgreSQL.
 
 ## Data Flow
 
-1. Collect airline-direct and OTA offers through source-specific connectors.
+1. Collect airline-direct and OTA offers through channel-specific connectors.
 2. Normalize into PostgreSQL tables such as `flight_offers` and `flight_offer_raw_meta`.
 3. Group parallel airline runs into one shared `cycle_id`.
 4. Compare current vs previous cycle snapshots.
@@ -84,7 +84,7 @@ Database configuration is resolved from either:
 - `AIRLINE_DB_URL`
 - or `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
 
-See [core/runtime_config.py](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/core/runtime_config.py).
+See [core/runtime_config.py](core/runtime_config.py).
 
 ## Common Commands
 
@@ -130,7 +130,7 @@ Run local CI checks:
   Airline, route, schedule, market, and date configuration.
 
 - `modules/`
-  Source connectors and airline/OTA acquisition logic.
+  Channel connectors and airline/OTA collection logic.
 
 - `engines/`
   Comparison, reporting, route-scoping, and workbook rendering logic.
@@ -162,13 +162,13 @@ Run local CI checks:
 
 ## File Role Notes
 
-- [strategy_engine.py](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/strategy_engine.py)
+- [strategy_engine.py](strategy_engine.py)
   Experimental signal-derivation layer. It is not part of the main reporting path and is now treated as optional.
 
-- [generate_reports.py](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/generate_reports.py)
+- [generate_reports.py](generate_reports.py)
   Standard pack generator for broad report output.
 
-- [generate_route_flight_fare_monitor.py](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/generate_route_flight_fare_monitor.py)
+- [generate_route_flight_fare_monitor.py](generate_route_flight_fare_monitor.py)
   Specialized route-flight workbook generator for the operational monitor.
 
 ## Status
@@ -182,4 +182,4 @@ The repository currently supports:
 - ML/DL forecasting groundwork with expanding feature engineering
 - first-pass API and warehouse scaffolding for the web and BI layers
 
-Use [PROJECT_DECISIONS.md](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/PROJECT_DECISIONS.md) for strategic scope and [OPERATIONS_RUNBOOK.md](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/OPERATIONS_RUNBOOK.md) for command-level operations.
+Use [PROJECT_DECISIONS.md](PROJECT_DECISIONS.md) for strategic scope and [OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) for command-level operations.

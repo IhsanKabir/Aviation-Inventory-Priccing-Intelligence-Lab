@@ -142,6 +142,7 @@ def change_events(
     destination: list[str] | None = Query(default=None),
     domain: list[str] | None = Query(default=None),
     change_type: list[str] | None = Query(default=None),
+    direction: list[str] | None = Query(default=None),
     limit: int = Query(default=settings.default_limit, ge=1),
     db: Session = Depends(get_db),
 ) -> dict:
@@ -155,6 +156,7 @@ def change_events(
             destinations=destination,
             domains=domain,
             change_types=change_type,
+            directions=direction,
             limit=_cap_limit(limit),
         )
     }

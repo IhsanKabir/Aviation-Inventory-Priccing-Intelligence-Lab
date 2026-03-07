@@ -284,6 +284,7 @@ def get_change_events(
     destinations: Sequence[str] | None = None,
     domains: Sequence[str] | None = None,
     change_types: Sequence[str] | None = None,
+    directions: Sequence[str] | None = None,
     limit: int = 1000,
 ) -> list[dict[str, Any]]:
     clauses = ["1=1"]
@@ -299,6 +300,7 @@ def get_change_events(
     _apply_in_filter(clauses, params, "cce.destination", destinations, "destination")
     _apply_in_filter(clauses, params, "cce.domain", domains, "domain", uppercase=False)
     _apply_in_filter(clauses, params, "cce.change_type", change_types, "change_type", uppercase=False)
+    _apply_in_filter(clauses, params, "cce.direction", directions, "direction", uppercase=False)
 
     rows = session.execute(
         text(

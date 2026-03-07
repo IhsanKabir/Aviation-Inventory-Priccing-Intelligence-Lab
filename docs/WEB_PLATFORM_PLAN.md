@@ -65,7 +65,7 @@ The web app should support:
   Main orchestrator. Keep.
 
 - `run_all.py`
-  Main source-capture runner. Keep.
+  Main collection runner. Keep.
 
 - `generate_reports.py`
   Standard reporting pack. Keep.

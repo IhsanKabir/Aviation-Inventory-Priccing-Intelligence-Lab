@@ -62,14 +62,10 @@ $env:GOOGLE_APPLICATION_CREDENTIALS="C:\\path\\to\\aero-pulse-bq-loader.json"
 
 ## Step 6: Create the BigQuery tables
 
-Use:
+Run in order:
 
-- [sql/bigquery/create_analytics_tables.sql](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/sql/bigquery/create_analytics_tables.sql)
-
-Replace:
-
-1. `__PROJECT_ID__` -> `aeropulseintelligence`
-2. `__DATASET__` -> `aviation_intel`
+1. [sql/bigquery/create_aviation_intel_dataset.sql](../../sql/bigquery/create_aviation_intel_dataset.sql)
+2. [sql/bigquery/create_aviation_intel_tables.sql](../../sql/bigquery/create_aviation_intel_tables.sql)
 
 ## Step 7: Stage export files locally
 

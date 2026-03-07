@@ -30,7 +30,7 @@ Override with:
 
 See:
 
-- [apps/web/.env.example](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/apps/web/.env.example)
+- [.env.example](.env.example)
 
 ## Current Pages
 
@@ -38,7 +38,13 @@ See:
   Executive shell with API health, latest cycle, airline, and route cards.
 
 - `/routes`
-  Route-monitor plan surface.
+  Live route monitor with API-backed filters for route, airline, and cabin scope.
+
+- `/penalties`
+  Penalty comparison screen against the reporting API.
+
+- `/taxes`
+  Tax comparison screen against the reporting API.
 
 - `/changes`
   Change-event browser plan surface.

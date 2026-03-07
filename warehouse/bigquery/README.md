@@ -30,20 +30,23 @@ This is the strongest free-to-start combination for:
 
 Source of truth for export layout:
 
-- [sql/bigquery/create_analytics_tables.sql](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/sql/bigquery/create_analytics_tables.sql)
-- [tools/export_bigquery_stage.py](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/tools/export_bigquery_stage.py)
-- [warehouse/bigquery/BOOTSTRAP_CHECKLIST.md](C:/Users/TLL-90134/Documents/airline_scraper_full_clone/warehouse/bigquery/BOOTSTRAP_CHECKLIST.md)
+- [sql/bigquery/create_analytics_tables.sql](../../sql/bigquery/create_analytics_tables.sql)
+- [sql/bigquery/create_aviation_intel_dataset.sql](../../sql/bigquery/create_aviation_intel_dataset.sql)
+- [sql/bigquery/create_aviation_intel_tables.sql](../../sql/bigquery/create_aviation_intel_tables.sql)
+- [tools/export_bigquery_stage.py](../../tools/export_bigquery_stage.py)
+- [warehouse/bigquery/BOOTSTRAP_CHECKLIST.md](BOOTSTRAP_CHECKLIST.md)
 
 ## Step-by-Step Setup
 
 1. Create a Google Cloud project.
 2. Enable BigQuery API.
-3. Create a dataset for this platform.
+3. Create dataset `aviation_intel` for this platform.
 4. Create a service account with BigQuery Data Editor access for that dataset.
 5. Point `GOOGLE_APPLICATION_CREDENTIALS` to the service account JSON locally.
-6. Run the local export staging command.
-7. Load staged parquet files into BigQuery.
-8. Connect Looker Studio to the curated dataset.
+6. Run the concrete dataset bootstrap SQL.
+7. Run the local export staging command.
+8. Load staged parquet files into BigQuery.
+9. Connect Looker Studio to the curated dataset.
 
 ## Local Export Example
 
