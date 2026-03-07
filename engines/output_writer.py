@@ -1,4 +1,4 @@
-import pandas as pd
+﻿import pandas as pd
 import hashlib
 from xlsxwriter.utility import xl_range
 
@@ -887,7 +887,7 @@ class OutputWriter:
                         tms = self._join_limited(rec.get("timings") or [], limit=4)
                         entries.append(f"{ac}:{fl}[{tms}]")
                     details = self._join_limited(entries, limit=5)
-                    value = f"Σ{total} | {details}"
+                    value = f"Î£{total} | {details}"
                     fmt = fmt_cell
                 sheet.write(row, 1 + i, value, fmt)
             row += 1
@@ -1417,11 +1417,11 @@ class OutputWriter:
             c += 1
 
         sheet.write(4, 0, "Signals", fmt_chip_label)
-        sheet.write(4, 1, "↑ Increase", fmt_sig_inc)
-        sheet.write(4, 2, "↓ Decrease", fmt_sig_dec)
+        sheet.write(4, 1, "\u2191 Increase", fmt_sig_inc)
+        sheet.write(4, 2, "\u2193 Decrease", fmt_sig_dec)
         sheet.write(4, 3, "NEW", fmt_sig_new)
         sheet.write(4, 4, "SOLD OUT", fmt_sig_sold)
-        sheet.write(4, 5, "— Unknown", fmt_sig_unk)
+        sheet.write(4, 5, "\u2014 Unknown", fmt_sig_unk)
 
         header_row = 6
         for idx, col in enumerate(cols):
@@ -1554,7 +1554,17 @@ class OutputWriter:
         sheet = workbook.add_worksheet("Route Row Index")
         sheet.hide()
 
-        headers = ["route", "row_number", "variant_key", "airlines_csv", "signals_csv", "airline_signals_csv"]
+        headers = [
+            "route",
+            "row_number",
+            "variant_key",
+            "flight_date",
+            "airlines_csv",
+            "signals_csv",
+            "airline_signals_csv",
+            "is_primary_variant",
+            "has_history_stack",
+        ]
         for c, h in enumerate(headers):
             sheet.write(0, c, h)
 
@@ -1563,9 +1573,12 @@ class OutputWriter:
             sheet.write(row, 0, str(rec.get("route") or ""))
             sheet.write(row, 1, int(rec.get("row_number") or 0))
             sheet.write(row, 2, str(rec.get("variant_key") or ""))
-            sheet.write(row, 3, str(rec.get("airlines_csv") or ""))
-            sheet.write(row, 4, str(rec.get("signals_csv") or ""))
-            sheet.write(row, 5, str(rec.get("airline_signals_csv") or ""))
+            sheet.write(row, 3, str(rec.get("flight_date") or ""))
+            sheet.write(row, 4, str(rec.get("airlines_csv") or ""))
+            sheet.write(row, 5, str(rec.get("signals_csv") or ""))
+            sheet.write(row, 6, str(rec.get("airline_signals_csv") or ""))
+            sheet.write(row, 7, int(rec.get("is_primary_variant") or 0))
+            sheet.write(row, 8, int(rec.get("has_history_stack") or 0))
             row += 1
 
     def _write_route_column_index(self, workbook, cols):
@@ -1711,6 +1724,10 @@ class OutputWriter:
         fmt_sub = workbook.add_format({"font_name": "Segoe UI", "font_script": 2, "font_size": cfg["sub"], "bold": True})
         fmt_sub_soldout = workbook.add_format({"font_name": "Segoe UI", "font_script": 2, "font_size": cfg["sub"], "bold": True, "italic": True, "font_color": "#777777"})
         fmt_sub_new = workbook.add_format({"font_name": "Segoe UI", "font_script": 2, "font_size": cfg["sub"], "bold": True, "italic": True, "font_color": "#1F4BD8"})
+        fmt_sig_count_sub = workbook.add_format({"font_name": "Segoe UI", "font_script": 2, "font_size": max(cfg["sub"] - 1, 8), "bold": True})
+        arrow_up = "\u2191"
+        arrow_down = "\u2193"
+        emdash = "\u2014"
 
         fmt_sheet_title = workbook.add_format({"font_name": "Segoe UI", "bold": True, "font_size": cfg["title"] + 1, "align": "center", "valign": "vcenter", "bg_color": "#F2F2F2", "border": 1})
         fmt_route = workbook.add_format({"font_name": "Segoe UI", "bold": True, "font_size": cfg["title"]})
@@ -1749,6 +1766,11 @@ class OutputWriter:
         fmt_tag_new = workbook.add_format({"font_name": "Segoe UI", "font_size": cfg["body"], "bold": True, "italic": True, "font_color": "#1F4BD8", "border": 1, "align": "center"})
         fmt_tag_soldout = workbook.add_format({"font_name": "Segoe UI", "font_size": cfg["body"], "bold": True, "italic": True, "font_color": "#777777", "border": 1, "align": "center"})
         fmt_date_row_bottom = workbook.add_format({"font_name": "Segoe UI", "font_size": cfg["body"], "border": 1, "align": "center", "valign": "vcenter", "bg_color": "#FAFAFA", "bottom": block_border})
+        # Softer pastel change cues for better readability on dense sheets.
+        fmt_change_up_bg = workbook.add_format({"bg_color": "#F1FBF4"})
+        fmt_change_down_bg = workbook.add_format({"bg_color": "#FFF4F6"})
+        fmt_change_new_bg = workbook.add_format({"bg_color": "#F1F4FF"})
+        fmt_change_sold_bg = workbook.add_format({"bg_color": "#F6F6F6"})
 
         fmt_header_airline = {}
         fmt_metric_airline = {}
@@ -1793,14 +1815,81 @@ class OutputWriter:
         curr_cap = str((df.get("current_capture_label", pd.Series(["Current snapshot"])).iloc[0] if len(df) else "Current snapshot") or "Current snapshot")
         prev_cap = str((df.get("previous_capture_label", pd.Series(["Previous snapshot"])).iloc[0] if len(df) else "Previous snapshot") or "Previous snapshot")
 
+        history_day_variants = {}
+        history_offer_map = {}
+        history_day_capture_rows = {}
+        if isinstance(full_capture_history, pd.DataFrame) and not full_capture_history.empty:
+            hist = full_capture_history.copy()
+            need_cols = {
+                "route",
+                "airline",
+                "flight_number",
+                "flight_date",
+                "departure_time",
+                "capture_label",
+                "captured_at_utc",
+                "state_changed_flag",
+            }
+            if need_cols.issubset(set(hist.columns)):
+                hist["route"] = hist["route"].astype(str)
+                hist["airline"] = hist["airline"].astype(str).str.upper().str.strip()
+                hist["flight_number"] = hist["flight_number"].astype(str).str.strip()
+                hist["flight_date"] = pd.to_datetime(hist["flight_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                hist["departure_time"] = hist["departure_time"].astype(str).str.strip().str.slice(0, 5)
+                hist["capture_label"] = hist["capture_label"].fillna("").astype(str)
+                hist["captured_at_utc"] = pd.to_datetime(hist["captured_at_utc"], errors="coerce", utc=True)
+                hist["cap_key"] = hist["captured_at_utc"].dt.strftime("%Y-%m-%d %H:%M:%S")
+                hist["cap_key"] = hist["cap_key"].fillna(hist["capture_label"])
+                hist = hist.sort_values(["route", "flight_date", "captured_at_utc", "cap_key"], na_position="last")
+
+                for _, rr in hist.iterrows():
+                    route_key = str(rr.get("route") or "")
+                    date_key = str(rr.get("flight_date") or "")
+                    cap_key = str(rr.get("cap_key") or "")
+                    if not route_key or not date_key or not cap_key:
+                        continue
+                    offer_key = (
+                        route_key,
+                        date_key,
+                        str(rr.get("airline") or "").upper().strip(),
+                        str(rr.get("flight_number") or "").strip(),
+                        str(rr.get("departure_time") or "").strip(),
+                        cap_key,
+                    )
+                    row_dict = rr.to_dict()
+                    history_offer_map[offer_key] = row_dict
+                    history_day_capture_rows.setdefault((route_key, date_key, cap_key), []).append(row_dict)
+
+                changed = hist[hist["state_changed_flag"].astype(str).str.upper() != "NO_CHANGE"].copy()
+                if not changed.empty:
+                    for (route_key, date_key), grp in changed.groupby(["route", "flight_date"], sort=False):
+                        uniq = (
+                            grp[["cap_key", "capture_label", "captured_at_utc"]]
+                            .dropna(subset=["cap_key"])
+                            .drop_duplicates(subset=["cap_key"], keep="first")
+                            .sort_values(["captured_at_utc", "cap_key"], na_position="last")
+                        )
+                        vals = [
+                            (str(r.cap_key), str(r.capture_label or r.cap_key))
+                            for r in uniq.itertuples(index=False)
+                        ]
+                        if vals:
+                            history_day_variants[(str(route_key), str(date_key))] = vals
+
         sheet.set_column(0, 0, 12)
         sheet.set_column(1, 1, 10)
         sheet.set_column(2, 2, 18)
 
         legend_airlines = [str(a).strip().upper() for a in airline_codes if str(a).strip()]
-        status_tokens = ["↑ Increase", "↓ Decrease", "NEW", "SOLD OUT", "— Unknown"]
+        signal_specs = [
+            ("INCREASE", f"{arrow_up} Increase"),
+            ("DECREASE", f"{arrow_down} Decrease"),
+            ("NEW", "NEW"),
+            ("SOLD OUT", "SOLD OUT"),
+            ("UNKNOWN", f"{emdash} Unknown"),
+        ]
         legend_airline_end_col = len(legend_airlines)
-        legend_status_end_col = len(status_tokens)
+        legend_status_end_col = len(signal_specs)
         title_end_col = max(12, 1 + max(legend_airline_end_col, legend_status_end_col))
         sheet.merge_range(0, 0, 0, title_end_col, "Aero Pulse Intelligence Monitor", fmt_sheet_title)
 
@@ -1812,17 +1901,23 @@ class OutputWriter:
             lc += 1
 
         sheet.write(2, 0, "Signals", fmt_legend_key)
-        for idx, token in enumerate(status_tokens):
+        signal_col_map = {}
+        signal_fmt_map = {}
+        signal_label_map = {}
+        for idx, (signal_key, signal_label) in enumerate(signal_specs):
             col = 1 + idx
-            if token == "NEW":
+            if signal_key == "NEW":
                 fmt = fmt_tag_new
-            elif token == "SOLD OUT":
+            elif signal_key == "SOLD OUT":
                 fmt = fmt_tag_soldout
-            elif "Unknown" in token:
+            elif signal_key == "UNKNOWN":
                 fmt = fmt_gray
             else:
                 fmt = fmt_cell
-            sheet.write(2, col, token, fmt)
+            signal_col_map[signal_key] = col
+            signal_fmt_map[signal_key] = fmt
+            signal_label_map[signal_key] = signal_label
+            sheet.write(2, col, signal_label, fmt)
 
         sheet.set_row(1, cfg["legend_row"])
         sheet.set_row(2, cfg["legend_row"])
@@ -1853,12 +1948,14 @@ class OutputWriter:
                         pass
             return False
 
-        row = 4
+        # Leave one visual spacer row between top controls/chips and first route block.
+        sheet.set_row(4, 8)
+        row = 5
         route_blocks = []
         route_row_entries = []
         route_col_entries = []
-        route_sep = "–"
-        leader_sep = "—"
+        route_sep = "\u2013"
+        leader_sep = "\u2014"
 
         for route, route_df in df.groupby("route", sort=False):
             route_block_start = row
@@ -1882,7 +1979,7 @@ class OutputWriter:
             total_flight_cols = max(1, sum(len(flight_metrics.get(f.flight_key, [])) for _, f in flights.iterrows()))
             leader_end_col = 2 + total_flight_cols
             if leader_df.empty:
-                leader_txt = "Route Price Leader (Lowest Fare): —"
+                leader_txt = "Route Price Leader (Lowest Fare): \u2014"
                 leader_fmt = fmt_route_leader_default
             else:
                 lr = leader_df.sort_values("min_fare").iloc[0]
@@ -1903,6 +2000,8 @@ class OutputWriter:
             sheet.merge_range(row, 2, row + 2, 2, "Capture Date/Time", fmt_header)
             col_map = {}
             col_airline = {}
+            col_flight_number = {}
+            col_departure_time = {}
             route_col_groups = []
             col = 3
             for _, f in flights.iterrows():
@@ -1915,6 +2014,8 @@ class OutputWriter:
                 sheet.merge_range(row, col, row, col + span - 1, f"{code} | {aircraft}", fmt_header_airline[theme])
                 col_map[f.flight_key] = col
                 col_airline[f.flight_key] = airline_code
+                col_flight_number[f.flight_key] = str(f.flight_number or "").strip()
+                col_departure_time[f.flight_key] = str(f.departure_time or "").strip()[:5]
                 for wcol in range(col, col + span):
                     sheet.set_column(wcol, wcol, 13)
                 route_col_groups.append(
@@ -1978,7 +2079,12 @@ class OutputWriter:
                 )
                 variants = [("current", day_curr_cap)]
                 if _changed(day_df):
-                    variants = [("previous", day_prev_cap), ("current", day_curr_cap)]
+                    day_key = (str(route), str(date))
+                    hist_variants = history_day_variants.get(day_key, [])
+                    if hist_variants:
+                        variants = [("history", cap_label, cap_key) for cap_key, cap_label in hist_variants]
+                    else:
+                        variants = [("previous", day_prev_cap), ("current", day_curr_cap)]
                 span = len(variants)
 
                 # Keep Date/Day unmerged on data rows so interactive row hiding in XLSM
@@ -1996,12 +2102,70 @@ class OutputWriter:
                     sheet.write(row_i, 0, str(date), date_group_fmt)
                     sheet.write(row_i, 1, day, date_group_fmt)
 
-                for vidx, (vkey, vlabel) in enumerate(variants):
+                has_history_stack = span > 1
+                for vidx, variant in enumerate(variants):
+                    if isinstance(variant, tuple) and len(variant) >= 3:
+                        vkey, vlabel, vcap_key = variant[0], variant[1], str(variant[2] or "")
+                    else:
+                        vkey, vlabel = variant[0], variant[1]
+                        vcap_key = ""
                     row_i = row + vidx
-                    sheet.write(row_i, 2, vlabel, variant_date_fmts[vidx])
+                    is_primary_variant = vidx == (span - 1)
+                    capture_label = str(vlabel or "")
+                    if has_history_stack and is_primary_variant:
+                        capture_label = f"[+] {capture_label}"
+                    sheet.write(row_i, 2, capture_label, variant_date_fmts[vidx])
+                    if has_history_stack:
+                        if is_primary_variant:
+                            sheet.set_row(
+                                row_i,
+                                None,
+                                None,
+                                {
+                                    "level": 1,
+                                    "collapsed": True,
+                                },
+                            )
+                        else:
+                            sheet.set_row(
+                                row_i,
+                                None,
+                                None,
+                                {
+                                    "level": 1,
+                                    "hidden": True,
+                                },
+                            )
 
                     row_airline_signals = {}
-                    if str(vkey).lower() == "previous":
+                    if str(vkey).lower() == "history":
+                        cap_rows = history_day_capture_rows.get((str(route), str(date), vcap_key), [])
+                        for rr in cap_rows:
+                            ac = str(rr.get("airline") or "").upper().strip()
+                            if not ac:
+                                continue
+                            sigs = set()
+                            status_up = str(rr.get("status") or "").upper()
+                            if status_up == "NEW":
+                                sigs.add("NEW")
+                            elif status_up == "SOLD OUT":
+                                sigs.add("SOLD OUT")
+                            for dc in ("min_fare_delta", "max_fare_delta", "tax_amount_delta", "min_seats_delta", "max_seats_delta", "load_pct_delta"):
+                                vv = rr.get(dc)
+                                if self._is_na(vv):
+                                    continue
+                                try:
+                                    fv = float(vv)
+                                except Exception:
+                                    continue
+                                if fv > 0:
+                                    sigs.add("INCREASE")
+                                elif fv < 0:
+                                    sigs.add("DECREASE")
+                            if not sigs:
+                                sigs.add("UNKNOWN")
+                            row_airline_signals.setdefault(ac, set()).update(sigs)
+                    elif str(vkey).lower() == "previous":
                         row_airlines = sorted(
                             {
                                 str(a).strip().upper()
@@ -2058,9 +2222,12 @@ class OutputWriter:
                             "route": str(route),
                             "row_number": int(row_i + 1),
                             "variant_key": str(vkey),
+                            "flight_date": str(date),
                             "airlines_csv": ",".join(row_airlines),
                             "signals_csv": ",".join(row_signals),
                             "airline_signals_csv": airline_signals_csv,
+                            "is_primary_variant": int(1 if is_primary_variant else 0),
+                            "has_history_stack": int(1 if has_history_stack else 0),
                         }
                     )
 
@@ -2082,9 +2249,9 @@ class OutputWriter:
                             if metric_name == "Min Fare":
                                 default_text = "N/O"
                             elif metric_name == "Open/Cap":
-                                default_text = "— / —"
+                                default_text = f"{emdash} / {emdash}"
                             else:
-                                default_text = "—"
+                                default_text = emdash
                             sheet.write(row_i, start_col + idx, default_text, metric_fmt)
 
                     for _, r in day_df.iterrows():
@@ -2123,7 +2290,96 @@ class OutputWriter:
                         seat_gray_fmt = _pick_fmt(open_cap_idx, gray_fmt_left, gray_fmt_mid, gray_fmt_right) if open_cap_idx is not None else None
                         load_gray_fmt = _pick_fmt(inv_press_idx, gray_fmt_left, gray_fmt_mid, gray_fmt_right) if inv_press_idx is not None else None
 
-                        if vkey == "previous":
+                        if str(vkey).lower() == "history":
+                            route_key = str(route)
+                            date_key = str(date)
+                            flight_no = str(col_flight_number.get(r.flight_key) or "").strip()
+                            dep_key = str(col_departure_time.get(r.flight_key) or "").strip()
+                            offer_key = (route_key, date_key, airline_code, flight_no, dep_key, vcap_key)
+                            hr = history_offer_map.get(offer_key)
+                            if not isinstance(hr, dict):
+                                continue
+
+                            min_fare_int = self._to_int(hr.get("min_fare"))
+                            base_price = f"{min_fare_int:,}" if min_fare_int is not None else emdash
+                            min_sign = self._delta_sign(hr.get("min_fare_delta"))
+                            min_arrow = arrow_up if min_sign > 0 else (arrow_down if min_sign < 0 else "")
+                            min_arrow_fmt = fmt_arrow_up if min_sign > 0 else (fmt_arrow_down if min_sign < 0 else min_cell_fmt)
+                            status_up = str(hr.get("status") or "").upper()
+                            status_txt = ""
+                            status_fmt = fmt_sub
+                            if status_up == "SOLD OUT":
+                                status_txt = " SOLD OUT"
+                                status_fmt = fmt_sub_soldout
+                            elif status_up == "NEW":
+                                status_txt = " NEW"
+                                status_fmt = fmt_sub_new
+                            min_parts = [min_cell_fmt, base_price]
+                            if status_txt:
+                                min_parts += [status_fmt, status_txt]
+                            if min_arrow:
+                                min_parts += [min_arrow_fmt, f" {min_arrow}"]
+                            min_parts += [min_cell_fmt]
+                            if len(min_parts) <= 3:
+                                sheet.write(row_i, base + min_idx, base_price, min_cell_fmt)
+                            else:
+                                sheet.write_rich_string(row_i, base + min_idx, *min_parts)
+
+                            max_fare_int = self._to_int(hr.get("max_fare"))
+                            max_sign = self._delta_sign(hr.get("max_fare_delta"))
+                            max_arrow = arrow_up if max_sign > 0 else (arrow_down if max_sign < 0 else "")
+                            max_arrow_fmt = fmt_arrow_up if max_sign > 0 else (fmt_arrow_down if max_sign < 0 else max_gray_fmt)
+                            if max_fare_int is None:
+                                sheet.write(row_i, base + max_idx, emdash, max_gray_fmt)
+                            elif max_arrow:
+                                sheet.write_rich_string(row_i, base + max_idx, max_gray_fmt, f"{max_fare_int:,}", max_arrow_fmt, f" {max_arrow}", max_gray_fmt)
+                            else:
+                                sheet.write(row_i, base + max_idx, f"{max_fare_int:,}", max_gray_fmt)
+
+                            tax_int = self._to_int(hr.get("tax_amount"))
+                            tax_sign = self._delta_sign(hr.get("tax_amount_delta"))
+                            tax_arrow = arrow_up if tax_sign > 0 else (arrow_down if tax_sign < 0 else "")
+                            tax_arrow_fmt = fmt_arrow_up if tax_sign > 0 else (fmt_arrow_down if tax_sign < 0 else tax_gray_fmt)
+                            if tax_int is None:
+                                sheet.write(row_i, base + tax_idx, emdash, tax_gray_fmt)
+                            elif tax_arrow:
+                                sheet.write_rich_string(row_i, base + tax_idx, tax_gray_fmt, f"{tax_int:,}", tax_arrow_fmt, f" {tax_arrow}", tax_gray_fmt)
+                            else:
+                                sheet.write(row_i, base + tax_idx, f"{tax_int:,}", tax_gray_fmt)
+
+                            if open_cap_idx is not None:
+                                min_seat_int = self._to_int(hr.get("min_seats"))
+                                max_seat_int = self._to_int(hr.get("max_seats"))
+                                seat_sign = self._delta_sign(hr.get("min_seats_delta"))
+                                if seat_sign == 0:
+                                    seat_sign = self._delta_sign(hr.get("max_seats_delta"))
+                                seat_arrow = arrow_up if seat_sign > 0 else (arrow_down if seat_sign < 0 else "")
+                                seat_arrow_fmt = fmt_arrow_up if seat_sign > 0 else (fmt_arrow_down if seat_sign < 0 else seat_cell_fmt)
+                                if min_seat_int is None and max_seat_int is None:
+                                    sheet.write(row_i, base + open_cap_idx, f"{emdash} / {emdash}", seat_gray_fmt)
+                                elif min_seat_int is None:
+                                    sheet.write(row_i, base + open_cap_idx, f"{emdash} / {max_seat_int}", seat_gray_fmt)
+                                elif max_seat_int is None:
+                                    sheet.write(row_i, base + open_cap_idx, f"{min_seat_int} / {emdash}", seat_gray_fmt)
+                                elif seat_arrow:
+                                    sheet.write_rich_string(row_i, base + open_cap_idx, seat_cell_fmt, f"{min_seat_int} / {max_seat_int}", seat_arrow_fmt, f" {seat_arrow}", seat_cell_fmt)
+                                else:
+                                    sheet.write(row_i, base + open_cap_idx, f"{min_seat_int} / {max_seat_int}", seat_cell_fmt)
+
+                            if inv_press_idx is not None:
+                                load_int = self._to_int(hr.get("load_pct"))
+                                load_sign = self._delta_sign(hr.get("load_pct_delta"))
+                                load_arrow = arrow_up if load_sign > 0 else (arrow_down if load_sign < 0 else "")
+                                load_arrow_fmt = fmt_arrow_up if load_sign > 0 else (fmt_arrow_down if load_sign < 0 else load_gray_fmt)
+                                if load_int is None:
+                                    sheet.write(row_i, base + inv_press_idx, emdash, load_gray_fmt)
+                                elif load_arrow:
+                                    sheet.write_rich_string(row_i, base + inv_press_idx, load_gray_fmt, f"{load_int}%", load_arrow_fmt, f" {load_arrow}", load_gray_fmt)
+                                else:
+                                    sheet.write(row_i, base + inv_press_idx, f"{load_int}%", load_gray_fmt)
+                            continue
+
+                        if str(vkey).lower() == "previous":
                             min_fare_int = self._to_int(r.get("previous_min_fare"))
                             max_fare_int = self._to_int(r.get("previous_max_fare"))
                             tax_int = self._to_int(r.get("previous_tax"))
@@ -2133,30 +2389,30 @@ class OutputWriter:
                                 max_seat_int = self._to_int(r.get("max_seats"))
                             load_int = self._to_int(r.get("previous_load_pct"))
                             min_fmt = min_cell_fmt if min_fare_int is not None else _pick_fmt(min_idx, gray_fmt_left, gray_fmt_mid, gray_fmt_right)
-                            sheet.write(row_i, base + min_idx, f"{min_fare_int:,}" if min_fare_int is not None else "—", min_fmt)
-                            sheet.write(row_i, base + max_idx, f"{max_fare_int:,}" if max_fare_int is not None else "—", max_gray_fmt)
-                            sheet.write(row_i, base + tax_idx, f"{tax_int:,}" if tax_int is not None else "—", tax_gray_fmt)
+                            sheet.write(row_i, base + min_idx, f"{min_fare_int:,}" if min_fare_int is not None else emdash, min_fmt)
+                            sheet.write(row_i, base + max_idx, f"{max_fare_int:,}" if max_fare_int is not None else emdash, max_gray_fmt)
+                            sheet.write(row_i, base + tax_idx, f"{tax_int:,}" if tax_int is not None else emdash, tax_gray_fmt)
                             if open_cap_idx is not None:
                                 if min_seat_int is None and max_seat_int is None:
-                                    sheet.write(row_i, base + open_cap_idx, "— / —", seat_gray_fmt)
+                                    sheet.write(row_i, base + open_cap_idx, f"{emdash} / {emdash}", seat_gray_fmt)
                                 elif min_seat_int is None:
-                                    sheet.write(row_i, base + open_cap_idx, f"— / {max_seat_int}", seat_gray_fmt)
+                                    sheet.write(row_i, base + open_cap_idx, f"{emdash} / {max_seat_int}", seat_gray_fmt)
                                 elif max_seat_int is None:
-                                    sheet.write(row_i, base + open_cap_idx, f"{min_seat_int} / —", seat_gray_fmt)
+                                    sheet.write(row_i, base + open_cap_idx, f"{min_seat_int} / {emdash}", seat_gray_fmt)
                                 else:
                                     sheet.write(row_i, base + open_cap_idx, f"{min_seat_int} / {max_seat_int}", seat_cell_fmt)
                             if inv_press_idx is not None:
-                                sheet.write(row_i, base + inv_press_idx, f"{load_int}%" if load_int is not None else "—", load_gray_fmt)
+                                sheet.write(row_i, base + inv_press_idx, f"{load_int}%" if load_int is not None else emdash, load_gray_fmt)
                             continue
 
                         min_fare_int = self._to_int(r.min_fare)
                         min_rbd = str(r.min_rbd)[:1] if pd.notna(r.min_rbd) else ""
                         min_rbd_seats = self._to_int(r.min_rbd_seats)
                         sub = f"{min_rbd}-{min_rbd_seats}" if min_rbd and min_rbd_seats is not None else min_rbd
-                        base_price = f"{min_fare_int:,}" if min_fare_int is not None else "—"
+                        base_price = f"{min_fare_int:,}" if min_fare_int is not None else emdash
 
                         min_sign = self._delta_sign(r.min_fare_delta)
-                        min_arrow = "↑" if min_sign > 0 else ("↓" if min_sign < 0 else "")
+                        min_arrow = arrow_up if min_sign > 0 else (arrow_down if min_sign < 0 else "")
                         min_arrow_fmt = fmt_arrow_up if min_sign > 0 else (fmt_arrow_down if min_sign < 0 else min_cell_fmt)
 
                         status_txt = ""
@@ -2187,7 +2443,7 @@ class OutputWriter:
                             max_rbd_seats = self._to_int(r.max_rbd_seats)
                             max_sub = f"{max_rbd}-{max_rbd_seats}" if max_rbd and max_rbd_seats is not None else max_rbd
                             max_sign = self._delta_sign(r.max_fare_delta)
-                            max_arrow = "↑" if max_sign > 0 else ("↓" if max_sign < 0 else "")
+                            max_arrow = arrow_up if max_sign > 0 else (arrow_down if max_sign < 0 else "")
                             max_arrow_fmt = fmt_arrow_up if max_sign > 0 else (fmt_arrow_down if max_sign < 0 else max_gray_fmt)
                             parts = [max_gray_fmt, f"{max_fare_int:,}"]
                             if max_sub:
@@ -2200,14 +2456,14 @@ class OutputWriter:
                             else:
                                 sheet.write_rich_string(row_i, base + max_idx, *parts)
                         else:
-                            sheet.write(row_i, base + max_idx, "—", max_gray_fmt)
+                            sheet.write(row_i, base + max_idx, emdash, max_gray_fmt)
 
                         tax_int = self._to_int(r.current_tax)
                         tax_sign = self._delta_sign(r.tax_delta)
-                        tax_arrow = "↑" if tax_sign > 0 else ("↓" if tax_sign < 0 else "")
+                        tax_arrow = arrow_up if tax_sign > 0 else (arrow_down if tax_sign < 0 else "")
                         tax_arrow_fmt = fmt_arrow_up if tax_sign > 0 else (fmt_arrow_down if tax_sign < 0 else tax_gray_fmt)
                         if tax_int is None:
-                            sheet.write(row_i, base + tax_idx, "—", tax_gray_fmt)
+                            sheet.write(row_i, base + tax_idx, emdash, tax_gray_fmt)
                         elif tax_arrow:
                             sheet.write_rich_string(row_i, base + tax_idx, tax_gray_fmt, f"{tax_int:,}", tax_arrow_fmt, f" {tax_arrow}", tax_gray_fmt)
                         else:
@@ -2217,14 +2473,14 @@ class OutputWriter:
                             min_seat_int = self._to_int(r.min_seats)
                             max_seat_int = self._to_int(r.max_seats)
                             seat_sign = self._delta_sign(r.seat_delta)
-                            seat_arrow = "↑" if seat_sign > 0 else ("↓" if seat_sign < 0 else "")
+                            seat_arrow = arrow_up if seat_sign > 0 else (arrow_down if seat_sign < 0 else "")
                             seat_arrow_fmt = fmt_arrow_up if seat_sign > 0 else (fmt_arrow_down if seat_sign < 0 else seat_cell_fmt)
                             if min_seat_int is None and max_seat_int is None:
-                                sheet.write(row_i, base + open_cap_idx, "— / —", seat_gray_fmt)
+                                sheet.write(row_i, base + open_cap_idx, f"{emdash} / {emdash}", seat_gray_fmt)
                             elif min_seat_int is None:
-                                sheet.write(row_i, base + open_cap_idx, f"— / {max_seat_int}", seat_gray_fmt)
+                                sheet.write(row_i, base + open_cap_idx, f"{emdash} / {max_seat_int}", seat_gray_fmt)
                             elif max_seat_int is None:
-                                sheet.write(row_i, base + open_cap_idx, f"{min_seat_int} / —", seat_gray_fmt)
+                                sheet.write(row_i, base + open_cap_idx, f"{min_seat_int} / {emdash}", seat_gray_fmt)
                             elif seat_arrow:
                                 sheet.write_rich_string(row_i, base + open_cap_idx, seat_cell_fmt, f"{min_seat_int} / {max_seat_int}", seat_arrow_fmt, f" {seat_arrow}", seat_cell_fmt)
                             else:
@@ -2233,10 +2489,10 @@ class OutputWriter:
                         if inv_press_idx is not None:
                             load_int = self._to_int(r.load_pct)
                             load_sign = self._delta_sign(r.load_delta)
-                            load_arrow = "↑" if load_sign > 0 else ("↓" if load_sign < 0 else "")
+                            load_arrow = arrow_up if load_sign > 0 else (arrow_down if load_sign < 0 else "")
                             load_arrow_fmt = fmt_arrow_up if load_sign > 0 else (fmt_arrow_down if load_sign < 0 else load_gray_fmt)
                             if load_int is None:
-                                sheet.write(row_i, base + inv_press_idx, "—", load_gray_fmt)
+                                sheet.write(row_i, base + inv_press_idx, emdash, load_gray_fmt)
                             elif load_arrow:
                                 sheet.write_rich_string(row_i, base + inv_press_idx, load_gray_fmt, f"{load_int}%", load_arrow_fmt, f" {load_arrow}", load_gray_fmt)
                             else:
@@ -2262,9 +2518,12 @@ class OutputWriter:
                 }
             )
             route_end_row_excel = int(max(route_block_start + 1, row))
-            header_start_row_excel = int(route_block_start + 3)
-            header_end_row_excel = int(route_block_start + 5)
-            data_start_row_excel = int(route_block_start + 6)
+            # 1-based Excel rows for route block sections.
+            # route title row = route_block_start + 1
+            # flight header stack starts next row and spans 3 rows.
+            header_start_row_excel = int(route_block_start + 2)
+            header_end_row_excel = int(route_block_start + 4)
+            data_start_row_excel = int(route_block_start + 5)
             for grp in route_col_groups:
                 route_col_entries.append(
                     {
@@ -2279,13 +2538,97 @@ class OutputWriter:
                     }
                 )
 
-        sheet.freeze_panes(4, 3)
+        def _normalize_signal_token(raw_token: str) -> str:
+            token = str(raw_token or "").strip().upper()
+            if not token:
+                return ""
+            if "INCREASE" in token:
+                return "INCREASE"
+            if "DECREASE" in token:
+                return "DECREASE"
+            if token == "NEW":
+                return "NEW"
+            if "SOLD" in token:
+                return "SOLD OUT"
+            if "UNKNOWN" in token or token == "STABLE":
+                return "UNKNOWN"
+            return token
+
+        signal_row_counts = {"INCREASE": 0, "DECREASE": 0, "NEW": 0, "SOLD OUT": 0}
+        for rec in route_row_entries:
+            sig_csv = str(rec.get("signals_csv") or "")
+            uniq = set()
+            for part in sig_csv.split(","):
+                norm = _normalize_signal_token(part)
+                if norm in signal_row_counts:
+                    uniq.add(norm)
+            for norm in uniq:
+                signal_row_counts[norm] += 1
+
+        for signal_key, signal_label in signal_specs:
+            col = signal_col_map.get(signal_key)
+            fmt = signal_fmt_map.get(signal_key, fmt_cell)
+            if col is None:
+                continue
+            if signal_key == "UNKNOWN":
+                sheet.write(2, col, signal_label, fmt)
+                continue
+            count_val = int(signal_row_counts.get(signal_key, 0))
+            sheet.write_rich_string(
+                2,
+                col,
+                fmt,
+                f"{signal_label} ",
+                fmt_sig_count_sub,
+                f"({count_val})",
+                fmt,
+            )
+
+        for col_rec in route_col_entries:
+            try:
+                start_row = int(col_rec.get("data_start_row") or 0) - 1
+                end_row = int(col_rec.get("data_end_row") or 0) - 1
+                start_col = int(col_rec.get("start_col") or 0) - 1
+                end_col = int(col_rec.get("end_col") or 0) - 1
+            except Exception:
+                continue
+            if start_row < 0 or end_row < start_row or start_col < 0 or end_col < start_col:
+                continue
+            sheet.conditional_format(
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                {"type": "text", "criteria": "containing", "value": arrow_up, "format": fmt_change_up_bg},
+            )
+            sheet.conditional_format(
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                {"type": "text", "criteria": "containing", "value": arrow_down, "format": fmt_change_down_bg},
+            )
+            sheet.conditional_format(
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                {"type": "text", "criteria": "containing", "value": "NEW", "format": fmt_change_new_bg},
+            )
+            sheet.conditional_format(
+                start_row,
+                start_col,
+                end_row,
+                end_col,
+                {"type": "text", "criteria": "containing", "value": "SOLD OUT", "format": fmt_change_sold_bg},
+            )
+
+        sheet.freeze_panes(5, 3)
         self._write_airline_ops_compare(workbook, df)
         self._write_changes_summary(workbook, df)
         self._write_fare_trend_sparklines(workbook, df)
         self._write_penalty_comparison(workbook, df)
         self._write_tax_comparison(workbook, df)
-        self._write_full_capture_history(workbook, full_capture_history)
         self._write_route_filter_view(workbook, df)
         self._write_route_block_index(workbook, route_blocks)
         self._write_route_row_index(workbook, route_row_entries)

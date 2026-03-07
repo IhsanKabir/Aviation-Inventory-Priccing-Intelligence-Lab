@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import warnings
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -18,6 +19,8 @@ EVENT_TARGETS = {"total_change_events", "price_events", "availability_events"}
 SEARCH_TARGETS = {"min_price_bdt", "avg_seat_available", "offers_count", "soldout_rate"}
 SUPPORTED_ML_MODELS = {"catboost", "lightgbm"}
 SUPPORTED_DL_MODELS = {"mlp"}
+NON_NEGATIVE_TARGETS = EVENT_TARGETS | {"min_price_bdt", "avg_seat_available", "offers_count", "soldout_rate"}
+UNIT_INTERVAL_TARGETS = {"soldout_rate"}
 
 MARKET_PRIOR_NUMERIC_COLS = [
     "market_is_middle_east",
@@ -79,6 +82,18 @@ def parse_args():
     parser.add_argument("--backtest-val-days", type=int, default=7, help="Validation window length in days")
     parser.add_argument("--backtest-test-days", type=int, default=7, help="Test window length in days")
     parser.add_argument("--backtest-step-days", type=int, default=7, help="Step size between rolling splits (days)")
+    parser.add_argument(
+        "--backtest-model-min-coverage-ratio",
+        type=float,
+        default=0.8,
+        help="Min n coverage ratio vs best-covered model when selecting split winner (default: 0.8)",
+    )
+    parser.add_argument(
+        "--backtest-selection-metric",
+        choices=["mae", "rmse"],
+        default="mae",
+        help="Metric used to select winning model on validation split (default: mae)",
+    )
     parser.add_argument("--disable-backtest", action="store_true", help="Skip rolling-window backtest artifacts")
     parser.add_argument(
         "--ml-models",
@@ -334,8 +349,13 @@ def _ml_feature_frame(part: pd.DataFrame, target: str):
     work["lag2"] = vals.shift(2)
     work["lag3"] = vals.shift(3)
     work["lag7"] = vals.shift(7)
+    work["lag14"] = vals.shift(14)
     work["roll3"] = vals.shift(1).rolling(window=3, min_periods=1).mean()
     work["roll7"] = vals.shift(1).rolling(window=7, min_periods=1).mean()
+    work["roll14"] = vals.shift(1).rolling(window=14, min_periods=1).mean()
+    work["roll7_std"] = vals.shift(1).rolling(window=7, min_periods=2).std()
+    work["diff_1_2"] = work["lag1"] - work["lag2"]
+    work["diff_1_7"] = work["lag1"] - work["lag7"]
     work["ewm03"] = vals.shift(1).ewm(alpha=0.3, adjust=False).mean()
     report_day = pd.to_datetime(part["report_day"], errors="coerce")
     work["dow"] = report_day.dt.dayofweek
@@ -373,6 +393,71 @@ def _fill_ml_features(train_x: pd.DataFrame, pred_x: pd.DataFrame):
     return train_f, pred_f
 
 
+def _recency_weights(n: int, min_w: float = 0.5, max_w: float = 1.0):
+    n = int(max(n, 1))
+    if n == 1:
+        return np.array([max_w], dtype=float)
+    return np.linspace(float(min_w), float(max_w), n, dtype=float)
+
+
+def _clip_prediction_value(target: str, value):
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except Exception:
+        return value
+    if target in UNIT_INTERVAL_TARGETS:
+        return float(max(0.0, min(1.0, v)))
+    if target in NON_NEGATIVE_TARGETS:
+        return float(max(0.0, v))
+    return float(v)
+
+
+def _clip_prediction_columns(df: pd.DataFrame, target: str, pred_cols: list[str]):
+    if df is None or df.empty:
+        return df
+    out = df.copy()
+    cols = [c for c in pred_cols if c in out.columns]
+    if not cols:
+        return out
+    for col in cols:
+        out[col] = out[col].map(lambda v: _clip_prediction_value(target, v))
+    return out
+
+
+def _robust_prediction_bounds(y: pd.Series):
+    vals = pd.to_numeric(y, errors="coerce")
+    vals = vals[np.isfinite(vals.to_numpy(dtype=float, copy=False))]
+    if len(vals) == 0:
+        return None, None
+    q01 = float(np.quantile(vals, 0.01))
+    q25 = float(np.quantile(vals, 0.25))
+    q75 = float(np.quantile(vals, 0.75))
+    q99 = float(np.quantile(vals, 0.99))
+    iqr = max(0.0, q75 - q25)
+    lower = q01 - (2.0 * iqr)
+    upper = q99 + (2.0 * iqr)
+    if upper < lower:
+        lower = float(np.min(vals))
+        upper = float(np.max(vals))
+    return lower, upper
+
+
+def _clip_to_bounds(value, lower, upper):
+    if value is None:
+        return None
+    try:
+        v = float(value)
+    except Exception:
+        return value
+    if lower is not None and v < lower:
+        v = lower
+    if upper is not None and v > upper:
+        v = upper
+    return float(v)
+
+
 def _fit_predict_quantile(model_name: str, model_cls, quantile: float, train_x: pd.DataFrame, train_y: pd.Series, pred_x: pd.DataFrame, seed: int):
     train_f, pred_f = _fill_ml_features(train_x, pred_x)
     y = pd.to_numeric(train_y, errors="coerce")
@@ -381,6 +466,8 @@ def _fit_predict_quantile(model_name: str, model_cls, quantile: float, train_x: 
     y = y.loc[mask]
     if len(y) < 2:
         return None
+    sample_weight = _recency_weights(len(y))
+    lower, upper = _robust_prediction_bounds(y)
 
     if model_name == "catboost":
         model = model_cls(
@@ -391,9 +478,9 @@ def _fit_predict_quantile(model_name: str, model_cls, quantile: float, train_x: 
             random_seed=int(seed),
             verbose=False,
         )
-        model.fit(train_f, y, verbose=False)
+        model.fit(train_f, y, sample_weight=sample_weight, verbose=False)
         pred = model.predict(pred_f)
-        return float(np.asarray(pred).reshape(-1)[0])
+        return _clip_to_bounds(float(np.asarray(pred).reshape(-1)[0]), lower, upper)
 
     if model_name == "lightgbm":
         model = model_cls(
@@ -408,9 +495,9 @@ def _fit_predict_quantile(model_name: str, model_cls, quantile: float, train_x: 
             random_state=int(seed),
             verbose=-1,
         )
-        model.fit(train_f, y)
+        model.fit(train_f, y, sample_weight=sample_weight)
         pred = model.predict(pred_f)
-        return float(np.asarray(pred).reshape(-1)[0])
+        return _clip_to_bounds(float(np.asarray(pred).reshape(-1)[0]), lower, upper)
 
     return None
 
@@ -423,8 +510,16 @@ def _fit_predict_dl_quantile(model_name: str, model_cls, quantile: float, train_
     y = y.loc[mask]
     if len(y) < 8:
         return None
+    lower, upper = _robust_prediction_bounds(y)
 
     if model_name == "mlp":
+        # Scale features for stable neural-network optimization.
+        from sklearn.exceptions import ConvergenceWarning
+        from sklearn.preprocessing import StandardScaler
+
+        scaler = StandardScaler()
+        train_arr = scaler.fit_transform(train_f)
+        pred_arr = scaler.transform(pred_f)
         model = model_cls(
             hidden_layer_sizes=(64, 32),
             activation="relu",
@@ -437,16 +532,18 @@ def _fit_predict_dl_quantile(model_name: str, model_cls, quantile: float, train_
             n_iter_no_change=25,
             random_state=int(seed),
         )
-        model.fit(train_f, y)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=ConvergenceWarning)
+            model.fit(train_arr, y)
 
-        pred_mean = float(np.asarray(model.predict(pred_f)).reshape(-1)[0])
-        train_pred = np.asarray(model.predict(train_f)).reshape(-1)
+        pred_mean = float(np.asarray(model.predict(pred_arr)).reshape(-1)[0])
+        train_pred = np.asarray(model.predict(train_arr)).reshape(-1)
         residuals = np.asarray(y, dtype=float) - train_pred
         residuals = residuals[np.isfinite(residuals)]
         if residuals.size == 0:
-            return pred_mean
+            return _clip_to_bounds(pred_mean, lower, upper)
         q_adj = float(np.quantile(residuals, float(quantile)))
-        return pred_mean + q_adj
+        return _clip_to_bounds(pred_mean + q_adj, lower, upper)
 
     return None
 
@@ -1029,13 +1126,21 @@ def build_trend_summary(df: pd.DataFrame, target: str, group_cols: list[str]):
     return agg
 
 
-def _best_model_from_eval(eval_rows: pd.DataFrame):
+def _best_model_from_eval(eval_rows: pd.DataFrame, *, metric: str = "mae", min_coverage_ratio: float = 0.8):
     if eval_rows.empty:
         return None
-    candidates = eval_rows[(eval_rows["n"] > 0) & eval_rows["mae"].notna()].copy()
+    metric = "rmse" if str(metric or "").lower() == "rmse" else "mae"
+    min_coverage_ratio = float(max(0.0, min(1.0, min_coverage_ratio)))
+    candidates = eval_rows[(eval_rows["n"] > 0) & eval_rows[metric].notna()].copy()
     if candidates.empty:
         return None
-    candidates = candidates.sort_values(["mae", "rmse", "model"]).reset_index(drop=True)
+    max_n = int(candidates["n"].max())
+    keep_n = int(max_n * min_coverage_ratio)
+    covered = candidates[candidates["n"] >= keep_n].copy()
+    if not covered.empty:
+        candidates = covered
+    sort_cols = [metric, "rmse" if metric != "rmse" else "mae", "model"]
+    candidates = candidates.sort_values(sort_cols).reset_index(drop=True)
     return str(candidates.iloc[0]["model"])
 
 
@@ -1115,6 +1220,8 @@ def run_rolling_backtest(
     test_days: int,
     step_days: int,
     group_cols: list[str],
+    selection_metric: str = "mae",
+    model_min_coverage_ratio: float = 0.8,
 ):
     df = _normalize_report_day(history_df)
     df = df[df["report_day"].notna()].copy()
@@ -1172,7 +1279,11 @@ def run_rolling_backtest(
 
         val_eval, _ = evaluate_predictions(val_df, target=target, pred_cols=pred_cols, group_cols=group_cols)
         test_eval, _ = evaluate_predictions(test_df, target=target, pred_cols=pred_cols, group_cols=group_cols)
-        selected_model = _best_model_from_eval(val_eval)
+        selected_model = _best_model_from_eval(
+            val_eval,
+            metric=selection_metric,
+            min_coverage_ratio=model_min_coverage_ratio,
+        )
 
         split_rows.append(
             {
@@ -1236,6 +1347,8 @@ def run_rolling_backtest(
         "step_days": int(auto_window["step_days"]) if auto_window else int(step_days),
         "split_count": int(len(split_rows)),
         "metric_rows": int(len(metric_rows)),
+        "selection_metric": str(selection_metric),
+        "model_min_coverage_ratio": float(model_min_coverage_ratio),
     }
     return metric_df, split_df, meta
 
@@ -1317,6 +1430,8 @@ def main():
     if dl_model_classes:
         pred_cols += _dl_prediction_columns(active_dl_models, dl_quantiles)
 
+    history_df = _clip_prediction_columns(history_df, target=target, pred_cols=pred_cols)
+
     overall_eval, route_eval = evaluate_predictions(history_df, target=target, pred_cols=pred_cols, group_cols=group_cols)
     next_day_df = build_next_day_predictions(
         history_df,
@@ -1361,6 +1476,9 @@ def main():
                 merge_cols = [c for c in group_cols if c in next_dl_df.columns and c in next_day_df.columns]
                 merge_cols += [c for c in ["latest_report_day", "predicted_for_day"] if c in next_dl_df.columns and c in next_day_df.columns]
                 next_day_df = next_day_df.merge(next_dl_df, on=merge_cols, how="left", suffixes=("", "_dl"))
+    if not next_day_df.empty:
+        next_pred_cols = [c for c in pred_cols if c in next_day_df.columns]
+        next_day_df = _clip_prediction_columns(next_day_df, target=target, pred_cols=next_pred_cols)
     trend_df = build_trend_summary(history_df, target=target, group_cols=group_cols)
 
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1398,6 +1516,8 @@ def main():
             test_days=args.backtest_test_days,
             step_days=args.backtest_step_days,
             group_cols=group_cols,
+            selection_metric=args.backtest_selection_metric,
+            model_min_coverage_ratio=args.backtest_model_min_coverage_ratio,
         )
         backtest_metric_rows = int(len(backtest_eval_df))
         backtest_split_rows = int(len(backtest_splits_df))
@@ -1426,6 +1546,8 @@ def main():
                     "dl_skipped_models": dl_skipped,
                     "dl_quantiles": dl_quantiles,
                     "backtest": backtest_meta,
+                    "backtest_selection_metric": args.backtest_selection_metric,
+                    "backtest_model_min_coverage_ratio": args.backtest_model_min_coverage_ratio,
                 },
                 f,
                 indent=2,

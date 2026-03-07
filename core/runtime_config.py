@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import os
-from dotenv import load_dotenv
+from urllib.parse import quote_plus
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    # Optional dependency: allow runtime without python-dotenv.
+    def load_dotenv(*args, **kwargs):
+        return False
 
 
 def get_database_url(
@@ -25,8 +31,10 @@ def get_database_url(
     pwd = os.getenv("DB_PASSWORD", "").strip()
 
     if host and port and name and user:
+        user_q = quote_plus(user)
         if pwd:
-            return f"postgresql+psycopg2://{user}:{pwd}@{host}:{port}/{name}"
-        return f"postgresql+psycopg2://{user}@{host}:{port}/{name}"
+            pwd_q = quote_plus(pwd)
+            return f"postgresql+psycopg2://{user_q}:{pwd_q}@{host}:{port}/{name}"
+        return f"postgresql+psycopg2://{user_q}@{host}:{port}/{name}"
 
     return fallback

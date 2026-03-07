@@ -335,6 +335,13 @@ $env:AIRASTRA_SOURCE_MODE="sharetrip"
 # $env:SHARETRIP_PAGE_LIMIT="50"
 # $env:SHARETRIP_POLL_MAX_ATTEMPTS="8"
 # $env:SHARETRIP_POLL_SLEEP_SEC="1"
+# $env:SHARETRIP_ADAPTIVE_POLL_STOP="1"   # default on
+# $env:SHARETRIP_EARLY_STOP_MIN_PROGRESS="0.90"
+# $env:SHARETRIP_MULTI_PAGE_STABLE_POLLS="2"
+# Optional BS/2A fallback behavior:
+# default: empty ShareTrip result does NOT call BDFare (faster)
+# $env:BS_BDFARE_FALLBACK_ON_EMPTY="1"
+# $env:AIRASTRA_BDFARE_FALLBACK_ON_EMPTY="1"
 ```
 
 Quick connector validation:

@@ -47,6 +47,9 @@ ENV_POLL_SLEEP_SEC = "SHARETRIP_POLL_SLEEP_SEC"
 ENV_PAGE_LIMIT = "SHARETRIP_PAGE_LIMIT"
 ENV_MAX_PAGES = "SHARETRIP_MAX_PAGES"
 ENV_DEFAULT_AIRLINE_CODE = "SHARETRIP_AIRLINE_CODE"
+ENV_ADAPTIVE_POLL_STOP = "SHARETRIP_ADAPTIVE_POLL_STOP"
+ENV_EARLY_STOP_MIN_PROGRESS = "SHARETRIP_EARLY_STOP_MIN_PROGRESS"
+ENV_MULTI_PAGE_STABLE_POLLS = "SHARETRIP_MULTI_PAGE_STABLE_POLLS"
 
 
 def _safe_int(v: Any, default: Optional[int] = None) -> Optional[int]:
@@ -65,6 +68,20 @@ def _safe_float(v: Any, default: Optional[float] = None) -> Optional[float]:
         return float(v)
     except Exception:
         return default
+
+
+def _env_true(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _progress_fraction(v: Any) -> Optional[float]:
+    num = _safe_float(v)
+    if num is None:
+        return None
+    return max(0.0, min(1.0, float(num)))
 
 
 def _clip_text(v: Any, size: int = 600) -> str:
@@ -370,9 +387,16 @@ def fetch_flights_for_airline(
     poll_sleep = max(0.2, _safe_float(os.getenv(ENV_POLL_SLEEP_SEC), 1.0) or 1.0)
     page_limit = max(1, min(50, _safe_int(os.getenv(ENV_PAGE_LIMIT), 50) or 50))
     max_pages = max(1, _safe_int(os.getenv(ENV_MAX_PAGES), 6) or 6)
+    adaptive_poll_stop = _env_true(ENV_ADAPTIVE_POLL_STOP, default=True)
+    early_stop_min_progress = _progress_fraction(os.getenv(ENV_EARLY_STOP_MIN_PROGRESS))
+    if early_stop_min_progress is None:
+        early_stop_min_progress = 0.90
+    multi_page_stable_polls = max(1, _safe_int(os.getenv(ENV_MULTI_PAGE_STABLE_POLLS), 2) or 2)
 
     final_body: Any = None
     final_response: Dict[str, Any] = {}
+    last_full_page_signature: Optional[tuple[int, int]] = None
+    full_page_stable_polls = 0
     for i in range(1, poll_max + 1):
         status, body = _post_search_page(req, search_id, page=1, limit=page_limit, headers=headers)
         poll_info = {
@@ -381,24 +405,55 @@ def fetch_flights_for_airline(
         }
         if isinstance(body, dict):
             response = body.get("response") or {}
+            progress = _progress_fraction(response.get("progressBar"))
+            total_flights = max(0, _safe_int(response.get("totalFlightsCount"), 0) or 0)
+            matched_count = len(response.get("matchedFlights") or [])
             poll_info.update(
                 {
                     "code": body.get("code"),
                     "message": body.get("message"),
-                    "progressBar": response.get("progressBar"),
-                    "totalFlightsCount": response.get("totalFlightsCount"),
-                    "matchedFlights_count": len(response.get("matchedFlights") or []),
+                    "progressBar": progress,
+                    "totalFlightsCount": total_flights,
+                    "matchedFlights_count": matched_count,
                 }
             )
             final_body = body
             final_response = response if isinstance(response, dict) else {}
-            if response.get("progressBar") == 1:
-                break
+
+            full_page_ready = total_flights > 0 and matched_count >= min(total_flights, page_limit)
+            if full_page_ready:
+                signature = (total_flights, matched_count)
+                if signature == last_full_page_signature:
+                    full_page_stable_polls += 1
+                else:
+                    last_full_page_signature = signature
+                    full_page_stable_polls = 1
+            else:
+                last_full_page_signature = None
+                full_page_stable_polls = 0
+
+            poll_info["full_page_ready"] = full_page_ready
+            poll_info["full_page_stable_polls"] = full_page_stable_polls
+
+            stop_reason = None
+            if progress == 1.0:
+                stop_reason = "progress_complete"
+            elif adaptive_poll_stop and progress is not None and progress >= early_stop_min_progress and full_page_ready:
+                if total_flights <= page_limit:
+                    stop_reason = "adaptive_single_page_full"
+                elif full_page_stable_polls >= multi_page_stable_polls:
+                    stop_reason = "adaptive_multi_page_stable"
+            if stop_reason:
+                poll_info["stop_reason"] = stop_reason
+                out["raw"]["poll_stop_reason"] = stop_reason
         else:
             poll_info["body_preview"] = _clip_text(body, 240)
             final_body = body
         out["raw"]["poll_attempts"].append(poll_info)
-        time.sleep(poll_sleep)
+        if isinstance(body, dict) and poll_info.get("stop_reason"):
+            break
+        if i < poll_max:
+            time.sleep(poll_sleep)
 
     if not isinstance(final_body, dict):
         out["raw"]["error"] = "search_failed_non_json"

@@ -2,10 +2,39 @@ import argparse
 import json
 import logging
 import math
+import os
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+
+
+def _ensure_project_venv_python():
+    """
+    Re-exec with local .venv interpreter when available.
+    This avoids system-Python missing dependency errors on Windows.
+    """
+    script_path = Path(__file__).resolve()
+    venv_python = script_path.parent / ".venv" / "Scripts" / "python.exe"
+    if not venv_python.exists():
+        return
+
+    current = Path(sys.executable).resolve()
+    try:
+        same_python = current.samefile(venv_python)
+    except Exception:
+        same_python = str(current).lower() == str(venv_python).lower()
+    if same_python:
+        return
+
+    if os.environ.get("AIRLINE_SKIP_VENV_REEXEC", "0") == "1":
+        return
+
+    os.execv(str(venv_python), [str(venv_python), str(script_path), *sys.argv[1:]])
+
+
+_ensure_project_venv_python()
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -811,11 +840,11 @@ def parse_args():
     parser.add_argument(
         "--export-macro-xlsm",
         action="store_true",
-        help="Also export a macro-enabled .xlsm workbook with airline/signal filter controls.",
+        help="Also export a macro-enabled .xlsm workbook with click-based airline/signal controls on the main sheet.",
     )
     parser.add_argument(
         "--macro-xlsm-path",
-        help="Optional explicit output path for the macro-enabled workbook.",
+        help="Optional explicit output path for the macro-enabled .xlsm workbook.",
     )
     return parser.parse_args()
 

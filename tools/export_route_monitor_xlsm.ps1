@@ -1,4 +1,4 @@
-param(
+﻿param(
     [Parameter(Mandatory = $true)]
     [string]$InputXlsx,
     [string]$OutputXlsm = ""
@@ -90,8 +90,35 @@ try {
     $wsCtl.Cells.Item(5, 1).Value2 = "Main sheet is click-based. Use CSV fields only for Route Filter View."
     $wsCtl.Cells.Item(6, 1).Value2 = "ApplyRouteFilters"
     $wsCtl.Cells.Item(7, 1).Value2 = "ClearRouteFilters"
+    $wsCtl.Cells.Item(8, 1).Value2 = "Route Airport Filter"
+    $wsCtl.Cells.Item(8, 2).Value2 = "ALL"
+    $wsCtl.Cells.Item(9, 1).Value2 = "Main Mask Dirty Flag"
+    $wsCtl.Cells.Item(9, 2).Value2 = "0"
     $wsCtl.Columns.Item("A:B").AutoFit() | Out-Null
     $wsCtl.Visible = 2  # xlSheetVeryHidden
+
+    # Build unique airport list (origin/destination tokens from route keys) for
+    # in-sheet dropdown route filtering (e.g., DAC/CCU/RUH/MCT).
+    $airportSet = New-Object 'System.Collections.Generic.HashSet[string]'
+    [void]$airportSet.Add("ALL")
+    $lastBlockRow = [int]$wsBlockIndex.Cells.Item($wsBlockIndex.Rows.Count, 1).End(-4162).Row
+    for ($ri = 2; $ri -le $lastBlockRow; $ri++) {
+        $rk = [string]$wsBlockIndex.Cells.Item($ri, 1).Value2
+        if ([string]::IsNullOrWhiteSpace($rk)) { continue }
+        $parts = $rk.ToUpper().Split("-")
+        foreach ($p in $parts) {
+            $token = $p.Trim()
+            if ($token.Length -gt 0) { [void]$airportSet.Add($token) }
+        }
+    }
+    $airportList = @($airportSet) | Sort-Object
+    $airportCol = 4
+    $wsCtl.Cells.Item(1, $airportCol).Value2 = "route_airports"
+    $rAir = 2
+    foreach ($a in $airportList) {
+        $wsCtl.Cells.Item($rAir, $airportCol).Value2 = [string]$a
+        $rAir += 1
+    }
 
     $wsBase.Cells.Clear() | Out-Null
     $wsMain.UsedRange.Copy($wsBase.Range("A1")) | Out-Null
@@ -231,11 +258,11 @@ Private Function NormalizeSignalToken(ByVal raw As String) As String
     Dim t As String
     t = UCase(Trim(raw))
     If Len(t) = 0 Then Exit Function
-    If InStr(t, "INCREASE") > 0 Or InStr(t, "↑") > 0 Then
+    If InStr(t, "INCREASE") > 0 Or InStr(t, ChrW(8593)) > 0 Then
         NormalizeSignalToken = "INCREASE"
         Exit Function
     End If
-    If InStr(t, "DECREASE") > 0 Or InStr(t, "↓") > 0 Then
+    If InStr(t, "DECREASE") > 0 Or InStr(t, ChrW(8595)) > 0 Then
         NormalizeSignalToken = "DECREASE"
         Exit Function
     End If
@@ -247,7 +274,7 @@ Private Function NormalizeSignalToken(ByVal raw As String) As String
         NormalizeSignalToken = "SOLD OUT"
         Exit Function
     End If
-    If InStr(t, "UNKNOWN") > 0 Or InStr(t, "—") > 0 Then
+    If InStr(t, "UNKNOWN") > 0 Or InStr(t, ChrW(8212)) > 0 Then
         NormalizeSignalToken = "UNKNOWN"
         Exit Function
     End If
@@ -262,6 +289,35 @@ Private Function IsModeStrict(ByVal wsCtl As Worksheet) As Boolean
     IsModeStrict = (modeValue = MODE_STRICT)
 End Function
 
+Private Function NormalizeCaptureToggleLabel(ByVal raw As String) As String
+    Dim t As String
+    t = CStr(raw)
+    If Left(t, 4) = "[+] " Or Left(t, 4) = "[-] " Then
+        NormalizeCaptureToggleLabel = Mid(t, 5)
+    Else
+        NormalizeCaptureToggleLabel = t
+    End If
+End Function
+
+Private Function RouteMatchesAirport(ByVal routeKey As String, ByVal airport As String) As Boolean
+    Dim rk As String, ap As String
+    rk = UCase(Trim(routeKey))
+    ap = UCase(Trim(airport))
+    If Len(ap) = 0 Or ap = "ALL" Then
+        RouteMatchesAirport = True
+        Exit Function
+    End If
+    Dim parts() As String
+    parts = Split(rk, "-")
+    Dim i As Long
+    For i = LBound(parts) To UBound(parts)
+        If UCase(Trim(parts(i))) = ap Then
+            RouteMatchesAirport = True
+            Exit Function
+        End If
+    Next i
+End Function
+
 Private Sub RestoreMainSheetFromBase()
     Dim wsMain As Worksheet, wsBase As Worksheet
     Set wsMain = ThisWorkbook.Worksheets("Route Flight Fare Monitor")
@@ -272,6 +328,142 @@ Private Sub RestoreMainSheetFromBase()
     lc = wsBase.Cells(1, wsBase.Columns.Count).End(xlToLeft).Column
     If lr < 1 Or lc < 1 Then Exit Sub
     wsBase.Range(wsBase.Cells(1, 1), wsBase.Cells(lr, lc)).Copy wsMain.Cells(1, 1)
+End Sub
+
+Private Sub CollapseHistoryStacks(ByVal wsMain As Worksheet, ByVal wsRow As Worksheet)
+    Dim lastRowIdx As Long
+    lastRowIdx = wsRow.Cells(wsRow.Rows.Count, 1).End(xlUp).Row
+    If lastRowIdx < 2 Then Exit Sub
+
+    Dim groupRows As Object, groupPrimary As Object, groupHist As Object
+    Set groupRows = CreateObject("Scripting.Dictionary")
+    Set groupPrimary = CreateObject("Scripting.Dictionary")
+    Set groupHist = CreateObject("Scripting.Dictionary")
+
+    Dim r As Long
+    For r = 2 To lastRowIdx
+        Dim routeKey As String, flightDate As String
+        routeKey = UCase(Trim(CStr(wsRow.Cells(r, 1).Value2)))
+        flightDate = Trim(CStr(wsRow.Cells(r, 4).Value2))
+        If Len(routeKey) = 0 Or Len(flightDate) = 0 Then GoTo NextHistIndex
+
+        Dim grpKey As String
+        grpKey = routeKey & "|" & flightDate
+
+        Dim rowNum As Long
+        rowNum = CLng(Val(wsRow.Cells(r, 2).Value2))
+        If rowNum <= 0 Then GoTo NextHistIndex
+
+        If Not groupRows.Exists(grpKey) Then
+            Set groupRows(grpKey) = CreateObject("Scripting.Dictionary")
+        End If
+        groupRows(grpKey)(CStr(rowNum)) = True
+
+        Dim isPrimary As Boolean, hasHist As Boolean
+        isPrimary = (CLng(Val(wsRow.Cells(r, 8).Value2)) = 1)
+        hasHist = (CLng(Val(wsRow.Cells(r, 9).Value2)) = 1)
+        If isPrimary Then groupPrimary(grpKey) = rowNum
+        If hasHist Then groupHist(grpKey) = True
+NextHistIndex:
+    Next r
+
+    Dim g As Variant
+    For Each g In groupRows.Keys
+        If Not groupHist.Exists(g) Then GoTo NextGroup
+        If Not groupPrimary.Exists(g) Then GoTo NextGroup
+
+        Dim primaryRow As Long
+        primaryRow = CLng(groupPrimary(g))
+        If primaryRow <= 0 Then GoTo NextGroup
+        If wsMain.Rows(primaryRow).Hidden Then GoTo NextGroup
+
+        Dim rowMap As Object
+        Set rowMap = groupRows(g)
+        Dim k As Variant
+        For Each k In rowMap.Keys
+            Dim rr As Long
+            rr = CLng(k)
+            If rr <> primaryRow Then
+                wsMain.Rows(rr).Hidden = True
+            End If
+        Next k
+
+        Dim baseTxt As String
+        baseTxt = NormalizeCaptureToggleLabel(CStr(wsMain.Cells(primaryRow, 3).Value2))
+        wsMain.Cells(primaryRow, 3).Value2 = "[+] " & baseTxt
+NextGroup:
+    Next g
+End Sub
+
+Private Sub ToggleHistoryStackByRow(ByVal wsMain As Worksheet, ByVal wsRow As Worksheet, ByVal clickedRow As Long)
+    Dim lastRowIdx As Long
+    lastRowIdx = wsRow.Cells(wsRow.Rows.Count, 1).End(xlUp).Row
+    If lastRowIdx < 2 Then Exit Sub
+
+    Dim routeKey As String, flightDate As String, isPrimary As Boolean, hasHist As Boolean
+    routeKey = ""
+    flightDate = ""
+
+    Dim r As Long
+    For r = 2 To lastRowIdx
+        Dim rn As Long
+        rn = CLng(Val(wsRow.Cells(r, 2).Value2))
+        If rn <> clickedRow Then GoTo NextFind
+        routeKey = UCase(Trim(CStr(wsRow.Cells(r, 1).Value2)))
+        flightDate = Trim(CStr(wsRow.Cells(r, 4).Value2))
+        isPrimary = (CLng(Val(wsRow.Cells(r, 8).Value2)) = 1)
+        hasHist = (CLng(Val(wsRow.Cells(r, 9).Value2)) = 1)
+        Exit For
+NextFind:
+    Next r
+
+    If Len(routeKey) = 0 Or Len(flightDate) = 0 Then Exit Sub
+    If Not isPrimary Or Not hasHist Then Exit Sub
+    If wsMain.Rows(clickedRow).Hidden Then Exit Sub
+
+    Dim rowsInGroup As Object
+    Set rowsInGroup = CreateObject("Scripting.Dictionary")
+    For r = 2 To lastRowIdx
+        Dim rk As String, fd As String
+        rk = UCase(Trim(CStr(wsRow.Cells(r, 1).Value2)))
+        fd = Trim(CStr(wsRow.Cells(r, 4).Value2))
+        If rk <> routeKey Or fd <> flightDate Then GoTo NextGroupFind
+        If CLng(Val(wsRow.Cells(r, 9).Value2)) <> 1 Then GoTo NextGroupFind
+        Dim gr As Long
+        gr = CLng(Val(wsRow.Cells(r, 2).Value2))
+        If gr > 0 Then rowsInGroup(CStr(gr)) = True
+NextGroupFind:
+    Next r
+
+    Dim anyHidden As Boolean
+    anyHidden = False
+    Dim k As Variant
+    For Each k In rowsInGroup.Keys
+        Dim rr As Long
+        rr = CLng(k)
+        If rr <> clickedRow Then
+            If wsMain.Rows(rr).Hidden Then
+                anyHidden = True
+                Exit For
+            End If
+        End If
+    Next k
+
+    Dim baseTxt As String
+    baseTxt = NormalizeCaptureToggleLabel(CStr(wsMain.Cells(clickedRow, 3).Value2))
+    If anyHidden Then
+        For Each k In rowsInGroup.Keys
+            rr = CLng(k)
+            If rr <> clickedRow Then wsMain.Rows(rr).Hidden = False
+        Next k
+        wsMain.Cells(clickedRow, 3).Value2 = "[-] " & baseTxt
+    Else
+        For Each k In rowsInGroup.Keys
+            rr = CLng(k)
+            If rr <> clickedRow Then wsMain.Rows(rr).Hidden = True
+        Next k
+        wsMain.Cells(clickedRow, 3).Value2 = "[+] " & baseTxt
+    End If
 End Sub
 
 Private Function RowMatchesContext(ByVal rowAirCsv As String, ByVal rowSigCsv As String, ByVal selAir As Collection, ByVal selSig As Collection, ByVal airFilterActive As Boolean, ByVal sigFilterActive As Boolean) As Boolean
@@ -369,10 +561,14 @@ Private Sub ApplyStrictColumnMask(ByVal selAir As Collection, ByVal airFilterAct
         endCol = CLng(Val(wsCol.Cells(r, 6).Value2))
         If startRow <= 0 Or endRow < startRow Or startCol <= 0 Or endCol < startCol Then GoTo NextCol
 
+        On Error Resume Next
         If headerStart > 0 And headerEnd >= headerStart Then
             wsMain.Range(wsMain.Cells(headerStart, startCol), wsMain.Cells(headerEnd, endCol)).ClearContents
+            wsMain.Range(wsMain.Cells(headerStart, startCol), wsMain.Cells(headerEnd, endCol)).Borders.LineStyle = xlNone
         End If
         wsMain.Range(wsMain.Cells(startRow, startCol), wsMain.Cells(endRow, endCol)).ClearContents
+        wsMain.Range(wsMain.Cells(startRow, startCol), wsMain.Cells(endRow, endCol)).Borders.LineStyle = xlNone
+        On Error GoTo 0
 NextCol:
     Next r
 End Sub
@@ -456,7 +652,7 @@ Private Sub SetSelected(ByVal kind As String, ByVal wsCtl As Worksheet, ByVal co
     wsCtl.Range(StateCell(kind)).Value2 = CollectionToCsv(coll)
 End Sub
 
-Private Sub ToggleSelection(ByVal kind As String, ByVal token As String)
+Private Sub SelectToken(ByVal kind As String, ByVal token As String)
     Dim wsCtl As Worksheet, wsMain As Worksheet
     Set wsCtl = ThisWorkbook.Worksheets("Macro Control")
     Set wsMain = ThisWorkbook.Worksheets("Route Flight Fare Monitor")
@@ -473,20 +669,41 @@ Private Sub ToggleSelection(ByVal kind As String, ByVal token As String)
 
     If CollectionEquals(sel, allVals) Then
         AddUnique nextVals, token
-    ElseIf sel.Count = 1 And CollectionContains(sel, token) Then
-        Set nextVals = CloneCollection(allVals)
     Else
         Set nextVals = CloneCollection(sel)
-        If CollectionContains(nextVals, token) Then
-            On Error Resume Next
-            nextVals.Remove token
-            On Error GoTo 0
-        Else
-            AddUnique nextVals, token
-        End If
-        If nextVals.Count = 0 Then
-            Set nextVals = CloneCollection(allVals)
-        End If
+        AddUnique nextVals, token
+    End If
+
+    SetSelected kind, wsCtl, nextVals
+End Sub
+
+Private Sub UnselectToken(ByVal kind As String, ByVal token As String)
+    Dim wsCtl As Worksheet, wsMain As Worksheet
+    Set wsCtl = ThisWorkbook.Worksheets("Macro Control")
+    Set wsMain = ThisWorkbook.Worksheets("Route Flight Fare Monitor")
+
+    token = UCase(Trim(token))
+    If Len(token) = 0 Then Exit Sub
+
+    Dim sel As Collection, allVals As Collection, nextVals As Collection
+    Set sel = GetSelected(kind, wsCtl, wsMain)
+    Set allVals = GetUniverse(kind, wsMain)
+    Set nextVals = New Collection
+
+    If CollectionEquals(sel, allVals) Then
+        Set nextVals = CloneCollection(allVals)
+        On Error Resume Next
+        nextVals.Remove token
+        On Error GoTo 0
+    Else
+        Set nextVals = CloneCollection(sel)
+        On Error Resume Next
+        nextVals.Remove token
+        On Error GoTo 0
+    End If
+
+    If nextVals.Count = 0 Then
+        Set nextVals = CloneCollection(allVals)
     End If
 
     SetSelected kind, wsCtl, nextVals
@@ -506,16 +723,28 @@ Private Sub RefreshLegendSelectionStyling()
         Dim at As String
         at = UCase(Trim(CStr(wsMain.Cells(2, c).Value2)))
         If Len(at) = 0 Then Exit For
-        wsMain.Cells(2, c).Font.Strikethrough = Not CollectionContains(selAir, at)
-        wsMain.Cells(2, c).Font.Bold = CollectionContains(selAir, at)
+        Dim airSelected As Boolean
+        airSelected = CollectionContains(selAir, at)
+        wsMain.Cells(2, c).Font.Strikethrough = Not airSelected
+        wsMain.Cells(2, c).Font.Bold = airSelected
+        wsMain.Cells(2, c).Font.Color = IIf(airSelected, RGB(255, 255, 255), RGB(220, 220, 220))
+        wsMain.Cells(2, c).Interior.TintAndShade = IIf(airSelected, -0.08, 0.45)
+        wsMain.Cells(2, c).Borders(xlEdgeBottom).LineStyle = xlContinuous
+        wsMain.Cells(2, c).Borders(xlEdgeBottom).Weight = IIf(airSelected, xlMedium, xlThin)
     Next c
 
     For c = 2 To 250
         Dim st As String
         st = NormalizeSignalToken(CStr(wsMain.Cells(3, c).Value2))
         If Len(st) = 0 Then Exit For
-        wsMain.Cells(3, c).Font.Strikethrough = Not CollectionContains(selSig, st)
-        wsMain.Cells(3, c).Font.Bold = CollectionContains(selSig, st)
+        Dim sigSelected As Boolean
+        sigSelected = CollectionContains(selSig, st)
+        wsMain.Cells(3, c).Font.Strikethrough = Not sigSelected
+        wsMain.Cells(3, c).Font.Bold = sigSelected
+        wsMain.Cells(3, c).Font.Color = IIf(sigSelected, RGB(0, 0, 0), RGB(140, 140, 140))
+        wsMain.Cells(3, c).Interior.TintAndShade = IIf(sigSelected, -0.04, 0.30)
+        wsMain.Cells(3, c).Borders(xlEdgeBottom).LineStyle = xlContinuous
+        wsMain.Cells(3, c).Borders(xlEdgeBottom).Weight = IIf(sigSelected, xlMedium, xlThin)
     Next c
 
     On Error Resume Next
@@ -574,11 +803,13 @@ End Sub
 Public Sub ApplyMainSheetFilters()
     On Error GoTo EH
 
-    Dim prevEvents As Boolean, prevScreen As Boolean
+    Dim prevEvents As Boolean, prevScreen As Boolean, prevCalc As XlCalculation
     prevEvents = Application.EnableEvents
     prevScreen = Application.ScreenUpdating
+    prevCalc = Application.Calculation
     Application.EnableEvents = False
     Application.ScreenUpdating = False
+    Application.Calculation = xlCalculationManual
 
     Dim wsCtl As Worksheet, wsMain As Worksheet, wsBlock As Worksheet, wsRow As Worksheet
     Set wsCtl = ThisWorkbook.Worksheets("Macro Control")
@@ -586,7 +817,12 @@ Public Sub ApplyMainSheetFilters()
     Set wsBlock = ThisWorkbook.Worksheets("Route Block Index")
     Set wsRow = ThisWorkbook.Worksheets("Route Row Index")
 
-    RestoreMainSheetFromBase
+    Dim maskDirty As Boolean
+    maskDirty = (Trim(CStr(wsCtl.Range("B9").Value2)) = "1")
+    If maskDirty Then
+        RestoreMainSheetFromBase
+        wsCtl.Range("B9").Value2 = "0"
+    End If
 
     Dim selAir As Collection, selSig As Collection
     Dim allAir As Collection, allSig As Collection
@@ -600,7 +836,22 @@ Public Sub ApplyMainSheetFilters()
     sigFilterActive = Not CollectionEquals(selSig, allSig)
     strictMode = IsModeStrict(wsCtl)
 
-    wsMain.Rows.Hidden = False
+    Dim routeAirportFilter As String, routeAirportActive As Boolean
+    routeAirportFilter = UCase(Trim(CStr(wsMain.Range("G4").Value2)))
+    If Len(routeAirportFilter) = 0 Then
+        routeAirportFilter = "ALL"
+        wsMain.Range("G4").Value2 = "ALL"
+    End If
+    wsCtl.Range("B8").Value2 = routeAirportFilter
+    routeAirportActive = (routeAirportFilter <> "ALL")
+
+    Dim usedLastRow As Long, usedLastCol As Long
+    usedLastRow = wsMain.Cells(wsMain.Rows.Count, 1).End(xlUp).Row
+    usedLastCol = wsMain.Cells(2, wsMain.Columns.Count).End(xlToLeft).Column
+    If usedLastRow < 1 Then usedLastRow = 1
+    If usedLastCol < 1 Then usedLastCol = 1
+    wsMain.Rows("1:" & CStr(usedLastRow)).Hidden = False
+    wsMain.Range(wsMain.Cells(1, 1), wsMain.Cells(usedLastRow, usedLastCol)).EntireColumn.Hidden = False
     wsMain.Rows("1:4").Hidden = False
 
     Dim blocks As Object, routeHasMatch As Object, routeRowKeep As Object
@@ -629,6 +880,7 @@ Public Sub ApplyMainSheetFilters()
         Dim keepRoute As Boolean
         keepRoute = True
         If airFilterActive Then keepRoute = CsvIntersectsSelection(bAirCsv, selAir)
+        If keepRoute And routeAirportActive Then keepRoute = RouteMatchesAirport(routeKey, routeAirportFilter)
 
         If keepRoute Then
             blocks(routeKey) = Array(bStart, bEnd)
@@ -653,9 +905,9 @@ NextBlock:
         If rowNum <= 0 Then GoTo NextRouteRow
 
         Dim rowAirCsv As String, rowSigCsv As String, rowAirSigCsv As String
-        rowAirCsv = CStr(wsRow.Cells(r, 4).Value2)
-        rowSigCsv = CStr(wsRow.Cells(r, 5).Value2)
-        rowAirSigCsv = CStr(wsRow.Cells(r, 6).Value2)
+        rowAirCsv = CStr(wsRow.Cells(r, 5).Value2)
+        rowSigCsv = CStr(wsRow.Cells(r, 6).Value2)
+        rowAirSigCsv = CStr(wsRow.Cells(r, 7).Value2)
 
         Dim keepRow As Boolean
         If strictMode Then
@@ -725,15 +977,18 @@ NextRouteRow:
 NextRouteFinalize:
     Next routeKeyIter
 
-    If strictMode Then
+    If strictMode And airFilterActive Then
         ApplyStrictColumnMask selAir, airFilterActive, routeHasMatch, routeDataMin, routeDataMax
+        wsCtl.Range("B9").Value2 = "1"
     End If
 
+    CollapseHistoryStacks wsMain, wsRow
     RefreshLegendSelectionStyling
     wsMain.Activate
 Done:
     Application.EnableEvents = prevEvents
     Application.ScreenUpdating = prevScreen
+    Application.Calculation = prevCalc
     Exit Sub
 EH:
     MsgBox "ApplyMainSheetFilters failed: " & Err.Description, vbExclamation
@@ -745,6 +1000,11 @@ Public Sub ClearMainSheetFilters()
     Set wsCtl = ThisWorkbook.Worksheets("Macro Control")
     wsCtl.Range("B2").Value2 = ""
     wsCtl.Range("B3").Value2 = ""
+    wsCtl.Range("B8").Value2 = "ALL"
+    wsCtl.Range("B9").Value2 = "0"
+    On Error Resume Next
+    ThisWorkbook.Worksheets("Route Flight Fare Monitor").Range("G4").Value2 = "ALL"
+    On Error GoTo 0
     ApplyMainSheetFilters
 End Sub
 
@@ -777,7 +1037,7 @@ Public Sub HandleLegendClick(ByVal ws As Worksheet, ByVal Target As Range)
         airToken = UCase(Trim(CStr(Target.Value2)))
         If Len(airToken) = 0 Then Exit Sub
         If CollectionContains(GetLegendAirlines(ws), airToken) Then
-            ToggleSelection "air", airToken
+            SelectToken "air", airToken
             ApplyMainSheetFilters
         End If
         Exit Sub
@@ -793,10 +1053,62 @@ Public Sub HandleLegendClick(ByVal ws As Worksheet, ByVal Target As Range)
         sigToken = NormalizeSignalToken(CStr(Target.Value2))
         If Len(sigToken) = 0 Then Exit Sub
         If CollectionContains(GetLegendSignals(ws), sigToken) Then
-            ToggleSelection "sig", sigToken
+            SelectToken "sig", sigToken
             ApplyMainSheetFilters
         End If
         Exit Sub
+    End If
+
+    ' Capture-history stack toggle on Capture Date/Time column.
+    If c = 3 And r >= 6 Then
+        Dim txt As String
+        txt = CStr(Target.Value2)
+        If Left(txt, 4) = "[+] " Or Left(txt, 4) = "[-] " Then
+            Dim wsRow As Worksheet
+            Set wsRow = ThisWorkbook.Worksheets("Route Row Index")
+            ToggleHistoryStackByRow ws, wsRow, r
+        End If
+    End If
+End Sub
+
+Public Sub HandleLegendDoubleClick(ByVal ws As Worksheet, ByVal Target As Range, ByRef Cancel As Boolean)
+    If ws Is Nothing Or Target Is Nothing Then Exit Sub
+    If ws.Name <> "Route Flight Fare Monitor" Then Exit Sub
+    If Target.CountLarge <> 1 Then Exit Sub
+
+    Dim r As Long, c As Long
+    r = Target.Row
+    c = Target.Column
+
+    If r = 2 And c >= 2 Then
+        Dim airToken As String
+        airToken = UCase(Trim(CStr(Target.Value2)))
+        If CollectionContains(GetLegendAirlines(ws), airToken) Then
+            UnselectToken "air", airToken
+            ApplyMainSheetFilters
+            Cancel = True
+        End If
+        Exit Sub
+    End If
+
+    If r = 3 And c >= 2 Then
+        Dim sigToken As String
+        sigToken = NormalizeSignalToken(CStr(Target.Value2))
+        If CollectionContains(GetLegendSignals(ws), sigToken) Then
+            UnselectToken "sig", sigToken
+            ApplyMainSheetFilters
+            Cancel = True
+        End If
+        Exit Sub
+    End If
+End Sub
+
+Public Sub HandleMainSheetChange(ByVal ws As Worksheet, ByVal Target As Range)
+    If ws Is Nothing Or Target Is Nothing Then Exit Sub
+    If ws.Name <> "Route Flight Fare Monitor" Then Exit Sub
+    If Target.CountLarge <> 1 Then Exit Sub
+    If Target.Row = 4 And Target.Column = 7 Then
+        ApplyMainSheetFilters
     End If
 End Sub
 "@
@@ -815,12 +1127,22 @@ End Sub
         $vbComp.CodeModule.AddFromString($vba) | Out-Null
 
         $wsComp = $vbProj.VBComponents.Item($wsMain.CodeName)
-        $wsCode = @"
+$wsCode = @"
 Option Explicit
 
 Private Sub Worksheet_SelectionChange(ByVal Target As Range)
     On Error Resume Next
     RouteMonitorFilters.HandleLegendClick Me, Target
+End Sub
+
+Private Sub Worksheet_BeforeDoubleClick(ByVal Target As Range, Cancel As Boolean)
+    On Error Resume Next
+    RouteMonitorFilters.HandleLegendDoubleClick Me, Target, Cancel
+End Sub
+
+Private Sub Worksheet_Change(ByVal Target As Range)
+    On Error Resume Next
+    RouteMonitorFilters.HandleMainSheetChange Me, Target
 End Sub
 "@
         $lineCount = $wsComp.CodeModule.CountOfLines
@@ -888,31 +1210,45 @@ End Sub
     $wsMain.Range("A2:A3").Interior.Color = 15132390
     $wsMain.Range("A2:A3").Font.Bold = $true
 
-    $anchorCol = [int]([Math]::Max(1, $legendLastCol - 1))
-    $baseLeft = [double]$wsMain.Cells.Item(1, $anchorCol).Left
-    $baseTop = [double]$wsMain.Cells.Item(1, $anchorCol).Top
-    $wsMain.Cells.Item(1, $anchorCol).Value2 = "Quick Controls"
-    $wsMain.Cells.Item(2, $anchorCol).Value2 = "Click legend cells to toggle airline/signal."
-    $wsMain.Cells.Item(3, $anchorCol).Value2 = "Context=route compare, Strict=selected airlines only."
-    $wsMain.Range($wsMain.Cells.Item(1, $anchorCol), $wsMain.Cells.Item(3, $anchorCol + 2)).Font.Bold = $true
+    $anchorCol = 1
+    $baseLeft = [double]$wsMain.Cells.Item(4, $anchorCol).Left + 2
+    $baseTop = [double]$wsMain.Cells.Item(4, $anchorCol).Top + 2
+    $wsMain.Cells.Item(1, 1).Value2 = "Single click=select/add, double click=remove | Click [+] in Capture Date/Time to expand history"
+    $wsMain.Range("A1:J1").Font.Bold = $true
 
-    $btnModeContext = $wsMain.Shapes.AddShape(1, $baseLeft, $baseTop + 62, 95, 24)
+    $btnModeContext = $wsMain.Shapes.AddShape(1, $baseLeft, $baseTop, 102, 24)
     $btnModeContext.Name = "btnMainModeContext"
     $btnModeContext.TextFrame.Characters().Text = "Mode: Context"
     $btnModeContext.OnAction = "SetMainModeContext"
     $btnModeContext.Line.ForeColor.RGB = 2039583
 
-    $btnModeStrict = $wsMain.Shapes.AddShape(1, $baseLeft + 102, $baseTop + 62, 90, 24)
+    $btnModeStrict = $wsMain.Shapes.AddShape(1, $baseLeft + 108, $baseTop, 96, 24)
     $btnModeStrict.Name = "btnMainModeStrict"
     $btnModeStrict.TextFrame.Characters().Text = "Mode: Strict"
     $btnModeStrict.OnAction = "SetMainModeStrict"
     $btnModeStrict.Line.ForeColor.RGB = 8388608
 
-    $btnMainB = $wsMain.Shapes.AddShape(1, $baseLeft, $baseTop + 90, 194, 24)
+    $btnMainB = $wsMain.Shapes.AddShape(1, $baseLeft + 210, $baseTop, 88, 24)
     $btnMainB.Name = "btnClearMainFilters"
-    $btnMainB.TextFrame.Characters().Text = "Clear Main Sheet Filters"
+    $btnMainB.TextFrame.Characters().Text = "Clear All"
     $btnMainB.OnAction = "ClearMainSheetFilters"
     $btnMainB.Line.ForeColor.RGB = 3355443
+
+    # Route-airport dropdown (G4) and label (F4).
+    $wsMain.Cells.Item(4, 6).Value2 = "Route Airport:"
+    $wsMain.Cells.Item(4, 6).Font.Bold = $true
+    $wsMain.Cells.Item(4, 7).Value2 = "ALL"
+    $wsMain.Cells.Item(4, 7).HorizontalAlignment = -4108 # xlCenter
+    try {
+        $wsMain.Range("G4").Validation.Delete() | Out-Null
+    } catch {}
+    $lastAirportRow = [int]$rAir - 1
+    if ($lastAirportRow -ge 2) {
+        $listFormula = "='Macro Control'!`$D`$2:`$D`$$lastAirportRow"
+        $wsMain.Range("G4").Validation.Add(3, 1, 1, $listFormula) | Out-Null  # xlValidateList
+        $wsMain.Range("G4").Validation.IgnoreBlank = $true
+        $wsMain.Range("G4").Validation.InCellDropdown = $true
+    }
 
     try { $excel.Run("ApplyMainSheetFilters") | Out-Null } catch {}
 

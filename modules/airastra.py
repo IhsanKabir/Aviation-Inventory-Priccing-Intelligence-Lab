@@ -62,6 +62,14 @@ SEARCH_HEADERS = {
 ENV_COOKIES_PATH = "AIRASTRA_COOKIES_PATH"
 ENV_PROXY_URL = "AIRASTRA_PROXY_URL"
 ENV_SOURCE_MODE = "AIRASTRA_SOURCE_MODE"
+ENV_FALLBACK_ON_EMPTY = "AIRASTRA_BDFARE_FALLBACK_ON_EMPTY"
+
+
+def _env_true(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _sharetrip_fetch_with_bdfare_fallback(
@@ -86,6 +94,11 @@ def _sharetrip_fetch_with_bdfare_fallback(
     st_rows = sharetrip_out.get("rows") if isinstance(sharetrip_out, dict) else None
     st_ok = bool(sharetrip_out.get("ok")) if isinstance(sharetrip_out, dict) else False
     if st_ok and isinstance(st_rows, list) and st_rows:
+        return sharetrip_out
+
+    # Fast-path: ShareTrip returned a clean, successful empty result.
+    # Default behavior skips BDFare fallback to avoid slow no-inventory polls.
+    if st_ok and isinstance(st_rows, list) and not st_rows and not _env_true(ENV_FALLBACK_ON_EMPTY, default=False):
         return sharetrip_out
 
     LOG.warning("[2A] ShareTrip returned no usable rows; attempting BDFare fallback")
