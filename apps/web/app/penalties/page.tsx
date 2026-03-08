@@ -1,7 +1,7 @@
 import { LiveFilterControls } from "@/components/live-filter-controls";
 import { DataPanel } from "@/components/data-panel";
 import { MetricCard } from "@/components/metric-card";
-import { getAirlines, getLatestCycle, getPenaltyPayload, getRoutes } from "@/lib/api";
+import { getAirlines, getPenaltyPayload, getRoutes } from "@/lib/api";
 import { formatBooleanFlag, formatDhakaDateTime, formatMoney, normalizeLongText, shortCycle, summarizePenaltyText } from "@/lib/format";
 import { firstParam, manyParams, parseLimit, type RawSearchParams } from "@/lib/query";
 
@@ -21,23 +21,21 @@ export default async function PenaltiesPage({ searchParams }: PageProps) {
   const selectedAirlines = manyParams(params, "airline");
   const origin = firstParam(params, "origin");
   const destination = firstParam(params, "destination");
+  const cycleId = firstParam(params, "cycle_id") ?? undefined;
   const limit = parseLimit(firstParam(params, "limit"), 120);
   const routeKey = selectedRouteKey(origin, destination);
 
-  const [latestCycle, airlines, routes] = await Promise.all([
-    getLatestCycle(),
+  const [airlines, routes, penalties] = await Promise.all([
     getAirlines(),
-    getRoutes()
+    getRoutes(),
+    getPenaltyPayload({
+      cycleId,
+      airlines: selectedAirlines,
+      origins: origin ? [origin] : undefined,
+      destinations: destination ? [destination] : undefined,
+      limit
+    })
   ]);
-
-  const cycleId = firstParam(params, "cycle_id") ?? latestCycle.data?.cycle_id ?? undefined;
-  const penalties = await getPenaltyPayload({
-    cycleId,
-    airlines: selectedAirlines,
-    origins: origin ? [origin] : undefined,
-    destinations: destination ? [destination] : undefined,
-    limit
-  });
 
   const rows = penalties.data?.rows ?? [];
   const airlineOptions = [...(airlines.data?.items ?? [])]
@@ -65,7 +63,7 @@ export default async function PenaltiesPage({ searchParams }: PageProps) {
         <MetricCard
           label="Cycle"
           value={shortCycle(penalties.data?.cycle_id ?? cycleId ?? null)}
-          footnote={latestCycle.data?.cycle_completed_at_utc ? formatDhakaDateTime(latestCycle.data.cycle_completed_at_utc) : "No cycle loaded"}
+          footnote={penalties.ok ? "Latest warehouse-backed penalty slice" : "No cycle loaded"}
         />
         <MetricCard label="Penalty rows" value={rows.length.toLocaleString()} footnote={`Limit ${limit.toLocaleString()}`} />
         <MetricCard label="Airlines" value={airlineCount.toLocaleString()} footnote={selectedAirlines.length ? `${selectedAirlines.length} selected` : "All carriers"} />

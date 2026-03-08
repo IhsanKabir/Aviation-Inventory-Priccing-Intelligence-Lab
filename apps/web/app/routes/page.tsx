@@ -2,11 +2,10 @@ import { DataPanel } from "@/components/data-panel";
 import { MetricCard } from "@/components/metric-card";
 import { RouteMonitorMatrix } from "@/components/route-monitor-matrix";
 import {
-  getLatestCycle,
   getRouteMonitorMatrixPayload,
   getRoutes
 } from "@/lib/api";
-import { formatDhakaDateTime, shortCycle } from "@/lib/format";
+import { shortCycle } from "@/lib/format";
 import { firstParam, manyParams, parseLimit, type RawSearchParams } from "@/lib/query";
 
 type PageProps = {
@@ -19,23 +18,21 @@ export default async function RoutesPage({ searchParams }: PageProps) {
   const origin = firstParam(params, "origin");
   const destination = firstParam(params, "destination");
   const cabin = firstParam(params, "cabin");
+  const cycleId = firstParam(params, "cycle_id") ?? undefined;
   const routeLimit = parseLimit(firstParam(params, "route_limit"), 5);
   const historyLimit = parseLimit(firstParam(params, "history_limit"), 6);
 
-  const [latestCycle, routes] = await Promise.all([
-    getLatestCycle(),
-    getRoutes()
+  const [routes, matrix] = await Promise.all([
+    getRoutes(),
+    getRouteMonitorMatrixPayload({
+      cycleId,
+      origins: origin ? [origin] : undefined,
+      destinations: destination ? [destination] : undefined,
+      cabins: cabin ? [cabin] : undefined,
+      routeLimit,
+      historyLimit
+    })
   ]);
-
-  const cycleId = firstParam(params, "cycle_id") ?? latestCycle.data?.cycle_id ?? undefined;
-  const matrix = await getRouteMonitorMatrixPayload({
-    cycleId,
-    origins: origin ? [origin] : undefined,
-    destinations: destination ? [destination] : undefined,
-    cabins: cabin ? [cabin] : undefined,
-    routeLimit,
-    historyLimit
-  });
 
   const routeBlocks = matrix.data?.routes ?? [];
   const routeOptions = [...(routes.data?.items ?? [])]
@@ -62,7 +59,7 @@ export default async function RoutesPage({ searchParams }: PageProps) {
         <MetricCard
           label="Cycle"
           value={shortCycle(matrix.data?.cycle_id ?? cycleId ?? null)}
-          footnote={latestCycle.data?.cycle_completed_at_utc ? formatDhakaDateTime(latestCycle.data.cycle_completed_at_utc) : "No cycle loaded"}
+          footnote={matrix.ok ? "Latest warehouse-backed route matrix" : "No cycle loaded"}
         />
         <MetricCard label="Route blocks" value={routeBlocks.length.toLocaleString()} footnote={`Limit ${routeLimit.toLocaleString()}`} />
         <MetricCard

@@ -361,11 +361,11 @@ export async function getLatestCycle() {
 }
 
 export async function getAirlines() {
-  return fetchJsonWithRevalidate<{ items: AirlineItem[] }>("/api/v1/meta/airlines", 300);
+  return fetchJsonWithRevalidate<{ items: AirlineItem[] }>("/api/v1/meta/airlines", 900);
 }
 
 export async function getRoutes() {
-  return fetchJsonWithRevalidate<{ items: RouteItem[] }>("/api/v1/meta/routes", 300);
+  return fetchJsonWithRevalidate<{ items: RouteItem[] }>("/api/v1/meta/routes", 900);
 }
 
 export async function getDashboardPayload() {

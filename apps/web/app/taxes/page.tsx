@@ -1,7 +1,7 @@
 import { LiveFilterControls } from "@/components/live-filter-controls";
 import { DataPanel } from "@/components/data-panel";
 import { MetricCard } from "@/components/metric-card";
-import { getAirlines, getLatestCycle, getRoutes, getTaxPayload } from "@/lib/api";
+import { getAirlines, getRoutes, getTaxPayload } from "@/lib/api";
 import { formatDhakaDateTime, formatMoney, shortCycle } from "@/lib/format";
 import { firstParam, manyParams, parseLimit, type RawSearchParams } from "@/lib/query";
 
@@ -21,23 +21,21 @@ export default async function TaxesPage({ searchParams }: PageProps) {
   const selectedAirlines = manyParams(params, "airline");
   const origin = firstParam(params, "origin");
   const destination = firstParam(params, "destination");
+  const cycleId = firstParam(params, "cycle_id") ?? undefined;
   const limit = parseLimit(firstParam(params, "limit"), 120);
   const routeKey = selectedRouteKey(origin, destination);
 
-  const [latestCycle, airlines, routes] = await Promise.all([
-    getLatestCycle(),
+  const [airlines, routes, taxes] = await Promise.all([
     getAirlines(),
-    getRoutes()
+    getRoutes(),
+    getTaxPayload({
+      cycleId,
+      airlines: selectedAirlines,
+      origins: origin ? [origin] : undefined,
+      destinations: destination ? [destination] : undefined,
+      limit
+    })
   ]);
-
-  const cycleId = firstParam(params, "cycle_id") ?? latestCycle.data?.cycle_id ?? undefined;
-  const taxes = await getTaxPayload({
-    cycleId,
-    airlines: selectedAirlines,
-    origins: origin ? [origin] : undefined,
-    destinations: destination ? [destination] : undefined,
-    limit
-  });
 
   const rows = taxes.data?.rows ?? [];
   const airlineOptions = [...(airlines.data?.items ?? [])]
@@ -65,7 +63,7 @@ export default async function TaxesPage({ searchParams }: PageProps) {
         <MetricCard
           label="Cycle"
           value={shortCycle(taxes.data?.cycle_id ?? cycleId ?? null)}
-          footnote={latestCycle.data?.cycle_completed_at_utc ? formatDhakaDateTime(latestCycle.data.cycle_completed_at_utc) : "No cycle loaded"}
+          footnote={taxes.ok ? "Latest warehouse-backed tax slice" : "No cycle loaded"}
         />
         <MetricCard label="Tax rows" value={rows.length.toLocaleString()} footnote={`Limit ${limit.toLocaleString()}`} />
         <MetricCard label="Routes" value={routeCount.toLocaleString()} footnote={`${airlineCount.toLocaleString()} airlines in view`} />
