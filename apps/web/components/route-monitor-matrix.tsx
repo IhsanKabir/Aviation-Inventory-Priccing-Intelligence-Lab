@@ -9,7 +9,7 @@ import type {
   RouteMonitorMatrixPayload,
   RouteMonitorMatrixRoute
 } from "@/lib/api";
-import { formatDhakaDateTime, formatMoney, formatPercent } from "@/lib/format";
+import { formatDhakaDate, formatDhakaDateTime, formatMoney, formatPercent } from "@/lib/format";
 
 type ViewMode = "context" | "strict";
 type SignalKey = "increase" | "decrease" | "new" | "sold_out" | "unknown";
@@ -32,7 +32,17 @@ const AIRLINE_THEME: Record<string, { header: string; sub: string; cell: string;
   "6E": { header: "#2b2f86", sub: "#e5e6fb", cell: "#f4f4ff", text: "#1b1f69", headerText: "#ffffff" },
   EK: { header: "#d71920", sub: "#fde7e8", cell: "#fff4f4", text: "#7f1116", headerText: "#ffffff" },
   FZ: { header: "#005b96", sub: "#daeefe", cell: "#f1f8ff", text: "#0f3b66", headerText: "#ffffff" },
-  CZ: { header: "#2a9fd8", sub: "#ddf3fd", cell: "#f2fbff", text: "#0d4c69", headerText: "#ffffff" }
+  CZ: { header: "#2a9fd8", sub: "#ddf3fd", cell: "#f2fbff", text: "#0d4c69", headerText: "#ffffff" },
+  SQ: { header: "#b69100", sub: "#fcf1c7", cell: "#fff9e7", text: "#6c5600", headerText: "#1e1e1e" },
+  SV: { header: "#005f7f", sub: "#d8ecf1", cell: "#eef9fc", text: "#15404f", headerText: "#ffffff" },
+  MH: { header: "#004990", sub: "#ddeafd", cell: "#f2f7ff", text: "#153a63", headerText: "#ffffff" },
+  OD: { header: "#c63a24", sub: "#fde8e2", cell: "#fff5f1", text: "#6f261a", headerText: "#ffffff" },
+  QR: { header: "#5c0d45", sub: "#f2ddeb", cell: "#f9eff5", text: "#481038", headerText: "#ffffff" },
+  TG: { header: "#6c3c96", sub: "#eadcf6", cell: "#f5effb", text: "#4b2a67", headerText: "#ffffff" },
+  UL: { header: "#8c1d4d", sub: "#f6dfe8", cell: "#fbf0f4", text: "#581532", headerText: "#ffffff" },
+  WY: { header: "#6d2326", sub: "#f3dddd", cell: "#faefef", text: "#4d191b", headerText: "#ffffff" },
+  AK: { header: "#c92026", sub: "#fbe1e3", cell: "#fdf3f4", text: "#7e1a1e", headerText: "#ffffff" },
+  "8D": { header: "#2465a4", sub: "#dfeafb", cell: "#f3f8ff", text: "#163d65", headerText: "#ffffff" }
 };
 
 function themeForAirline(code: string) {
@@ -51,6 +61,14 @@ function signalArrow(signal: SignalKey) {
   if (signal === "increase") return "\u2191";
   if (signal === "decrease") return "\u2193";
   return "";
+}
+
+function signalTone(signal: SignalKey) {
+  if (signal === "increase") return "tone-up";
+  if (signal === "decrease") return "tone-down";
+  if (signal === "new") return "tone-new";
+  if (signal === "sold_out") return "tone-soldout";
+  return "tone-neutral";
 }
 
 function summarizeCell(cell: RouteMonitorMatrixCell | undefined) {
@@ -110,6 +128,14 @@ function routeLeader(route: RouteMonitorMatrixRoute, visibleFlights: RouteMonito
   }
 
   return best;
+}
+
+function formatLeaderDates(values: string[]) {
+  return values
+    .slice()
+    .sort()
+    .map((item) => formatDhakaDate(`${item}T00:00:00Z`).replace(",", ""))
+    .join(", ");
 }
 
 export function RouteMonitorMatrix({
@@ -240,6 +266,7 @@ export function RouteMonitorMatrix({
                   key={code}
                   className="report-airline-chip"
                   data-active={selectedAirlines.includes(code)}
+                  data-idle={selectedAirlines.length > 0 && !selectedAirlines.includes(code)}
                   onClick={() => toggleAirline(code)}
                   style={
                     {
@@ -264,12 +291,15 @@ export function RouteMonitorMatrix({
                 key={signal}
                 className="report-signal-chip"
                 data-active={selectedSignals.includes(signal)}
+                data-tone={signalTone(signal)}
                 onClick={() => toggleSignal(signal)}
                 type="button"
               >
-                {signal === "increase" ? "\u2191 " : signal === "decrease" ? "\u2193 " : ""}
-                {SIGNAL_LABELS[signal]}
-                {signal !== "unknown" ? ` (${signalCounts[signal]})` : ""}
+                <span className="chip-prefix">
+                  {signal === "increase" ? "\u2191" : signal === "decrease" ? "\u2193" : signal === "new" ? "NEW" : signal === "sold_out" ? "S/O" : "\u2014"}
+                </span>
+                <span>{SIGNAL_LABELS[signal]}</span>
+                {signal !== "unknown" ? <span className="chip-count">{signalCounts[signal]}</span> : null}
               </button>
             ))}
           </div>
@@ -302,7 +332,7 @@ export function RouteMonitorMatrix({
 
       <div className="route-report-stack">
         {visibleRoutes.length === 0 ? (
-          <div className="empty-state">No route blocks match the current airline/signal selection.</div>
+          <div className="empty-state">No route blocks match the current airline or signal selection.</div>
         ) : (
           visibleRoutes.map((route) => {
             const leader = routeLeader(route, route.flight_groups);
@@ -311,12 +341,21 @@ export function RouteMonitorMatrix({
                 <div className="route-report-title-row">
                   <div className="route-report-title">{route.route_key}</div>
                   <div className="route-report-leader">
-                    Route Price Leader (Lowest Fare):{" "}
+                    <span className="route-report-leader-label">Route Price Leader (Lowest Fare):</span>{" "}
                     {leader ? (
                       <>
-                        {leader.airline}
-                        {leader.flightNumber} — {leader.amount.toLocaleString()} (Dates:{" "}
-                        {leader.dates.map((item) => item.slice(5).replace("-", " ")).join(", ")})
+                        <span
+                          className={`leader-airline ${themeForAirline(leader.airline).headerText === "#1e1e1e" ? "leader-airline-dark" : ""}`}
+                          style={{
+                            background: themeForAirline(leader.airline).header,
+                            color: themeForAirline(leader.airline).headerText
+                          }}
+                        >
+                          {leader.airline}
+                          {leader.flightNumber}
+                        </span>{" "}
+                        <span className="leader-amount">{leader.amount.toLocaleString()}</span>{" "}
+                        <span className="leader-dates">(Dates: {formatLeaderDates(leader.dates)})</span>
                       </>
                     ) : (
                       "No visible fare leader"
@@ -406,16 +445,17 @@ export function RouteMonitorMatrix({
                               : formatDhakaDateTime(capture.captured_at_utc);
 
                           return (
-                            <tr className={capture.is_latest ? "latest-capture-row" : "history-capture-row"} key={`${rowKey}-${capture.captured_at_utc}`}>
-                              <td className="sticky-col sticky-route-meta route-value">
-                                {showDateMeta ? dateGroup.departure_date : ""}
-                              </td>
-                              <td className="sticky-col sticky-route-meta second route-value">
-                                {showDateMeta ? dateGroup.day_label : ""}
-                              </td>
+                            <tr
+                              className={capture.is_latest ? "latest-capture-row" : "history-capture-row"}
+                              data-group-start={captureIndex === 0}
+                              data-group-end={captureIndex === visibleCaptures.length - 1}
+                              key={`${rowKey}-${capture.captured_at_utc}`}
+                            >
+                              <td className="sticky-col sticky-route-meta route-value">{showDateMeta ? dateGroup.departure_date : ""}</td>
+                              <td className="sticky-col sticky-route-meta second route-value">{showDateMeta ? dateGroup.day_label : ""}</td>
                               <td className="sticky-col sticky-route-meta third route-value">
                                 {showDateMeta && dateGroup.captures.length > 1 ? (
-                                  <button className="history-toggle" onClick={() => toggleRow(rowKey)} type="button">
+                                  <button className="history-toggle" data-expanded={expanded} onClick={() => toggleRow(rowKey)} type="button">
                                     {expandLabel}
                                   </button>
                                 ) : (
@@ -433,7 +473,8 @@ export function RouteMonitorMatrix({
                                     key={`${capture.captured_at_utc}-${flight.flight_group_id}-min`}
                                     style={{ background: theme.cell, color: theme.text }}
                                   >
-                                    {summary.minFare} {signalArrow(signal)}
+                                    <span className="metric-value-text">{summary.minFare}</span>
+                                    {signalArrow(signal) ? <span className={`metric-arrow ${signal}`}>{signalArrow(signal)}</span> : null}
                                   </td>,
                                   <td
                                     className={`report-cell signal-${signal}`}
@@ -480,3 +521,4 @@ export function RouteMonitorMatrix({
     </div>
   );
 }
+
