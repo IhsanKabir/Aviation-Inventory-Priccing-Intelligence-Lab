@@ -53,9 +53,9 @@ export default async function RoutesPage({ searchParams }: PageProps) {
     <>
       <h1 className="page-title">Route Monitor</h1>
       <p className="page-copy">
-        Report-style route matrix against the reporting API. Route and cabin scope are
-        server-backed; airline, signal, and capture-history interaction are handled
-        directly in the page for workbook-like review without Excel.
+        Report-style route matrix against the reporting API. Hosted reads now prefer the
+        BigQuery warehouse path; airline, signal, and capture-history interaction stay in
+        the page for workbook-like review without Excel.
       </p>
 
       <div className="grid cards">

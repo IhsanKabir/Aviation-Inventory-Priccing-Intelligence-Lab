@@ -4,7 +4,7 @@ Multi-airline fare, inventory, OTA benchmarking, reporting, and forecasting plat
 
 ## What This Repository Does
 
-This project captures flight offer data from airline-direct and OTA channels, stores normalized cycle snapshots in PostgreSQL, generates operational Excel workbooks, and trains forecasting models for fare and inventory movement.
+This project captures flight offer data from airline-direct and OTA channels, stores normalized cycle snapshots in local PostgreSQL for operational collection/training, generates operational Excel workbooks, and publishes curated analytics plus ML/DL outputs into BigQuery for hosted reads and BI.
 
 Current implemented scope:
 
@@ -13,8 +13,8 @@ Current implemented scope:
 - OTA benchmarking support for interim carrier coverage
 - penalty and tax comparison sheets
 - ML/DL prediction pipeline with optional `catboost`, `lightgbm`, and `mlp`
-- FastAPI reporting API scaffold for the next web phase
-- BigQuery export scaffold for analytics and BI handoff
+- FastAPI reporting API for the web phase
+- BigQuery-backed hosted analytics, forecasting, and BI handoff
 
 Core project decisions and operating policy live in:
 
@@ -50,12 +50,15 @@ Core project decisions and operating policy live in:
 3. Group parallel airline runs into one shared `cycle_id`.
 4. Compare current vs previous cycle snapshots.
 5. Generate operational Excel outputs, API-ready reporting views, and forecasting artifacts.
-6. Export curated facts to BigQuery for BI and long-horizon analytics.
+6. Export curated facts plus ML/DL forecast outputs to BigQuery for hosted reads, BI, and long-horizon analytics.
 
 ## Target Platform Split
 
-- Operational application:
-  FastAPI reporting API + Next.js frontend on top of PostgreSQL.
+- Operational collection and training:
+  local PostgreSQL + Python pipeline.
+
+- Hosted application:
+  FastAPI reporting API + Next.js frontend on top of BigQuery curated reads.
 
 - Historical analytics and BI:
   BigQuery curated warehouse + Looker Studio dashboards.
@@ -158,7 +161,8 @@ Run local CI checks:
 - Some airline-direct endpoints are protected by anti-bot/WAF systems.
 - Excel route-monitor workbooks are feature-rich but can become slow under heavy route/history density.
 - OTA inventory availability is not exposed consistently for every carrier/channel.
-- PostgreSQL remains the operational source of truth for current-cycle comparisons and model training.
+- PostgreSQL remains the operational source of truth for local current-cycle comparisons and model training.
+- Hosted read surfaces should progressively move to BigQuery so the public/runtime app does not depend on paid managed PostgreSQL.
 
 ## File Role Notes
 

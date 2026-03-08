@@ -2,7 +2,7 @@
 
 ## Purpose
 
-BigQuery is the historical analytics layer for this platform. PostgreSQL stays operational; BigQuery holds curated fact tables for BI, thesis analysis, and longer-range query workloads.
+BigQuery is the hosted analytics and read layer for this platform. Local PostgreSQL stays operational for ingestion, comparisons, and ML/DL training; BigQuery holds curated fact tables for the website, Looker Studio, thesis analysis, and longer-range query workloads.
 
 ## Chosen BI Layer
 
@@ -28,8 +28,10 @@ This is the strongest free-to-start combination for:
 - `fact_forecast_bundle`
 - `fact_forecast_model_eval`
 - `fact_forecast_route_eval`
+- `fact_forecast_route_winner`
 - `fact_forecast_next_day`
 - `fact_backtest_eval`
+- `fact_backtest_route_winner`
 - `fact_backtest_split`
 
 ## Export Contract
@@ -55,7 +57,8 @@ Source of truth for export layout:
 7. Run the local export staging command.
 8. Load staged parquet files into BigQuery.
 9. Create Looker-facing views.
-10. Connect Looker Studio to the curated dataset views.
+10. Point hosted API reads to BigQuery-backed tables/views.
+11. Connect Looker Studio to the curated dataset views.
 
 ## Local Export Example
 

@@ -6,9 +6,13 @@ Move the main interactive experience away from Excel and into a responsive web a
 
 ## Chosen Architecture
 
-- Backend:
+- Local collection/training backend:
+  - Python collection pipeline
+  - local PostgreSQL for raw operational state, comparisons, and feature generation
+
+- Hosted reporting backend:
   - FastAPI
-  - PostgreSQL reporting queries
+  - BigQuery curated reads for public/runtime pages
 
 - Frontend:
   - Next.js
@@ -17,6 +21,7 @@ Move the main interactive experience away from Excel and into a responsive web a
 - Analytics:
   - BigQuery sandbox
   - Looker Studio for dashboards
+  - ML/DL evaluation and route-winner outputs published from local training runs
 
 ## Why This Is Better Than Extending Excel
 
@@ -29,12 +34,13 @@ Move the main interactive experience away from Excel and into a responsive web a
 
 The API should expose:
 
-- latest cycle snapshot
-- recent cycle list
+- latest cycle snapshot / freshness
+- route-monitor matrix
 - route-level change summary
 - detailed field-level change log
 - penalty snapshot
 - tax snapshot
+- forecasting bundle, route winners, backtest route winners
 - filter metadata (airlines, routes)
 
 ## Frontend Scope
@@ -53,11 +59,12 @@ The web app should support:
 1. Stabilize the FastAPI reporting contract.
 2. Build the Next.js route monitor shell.
 3. Replace Excel-only filtering with API-driven filtering.
-4. Add change-history drilldown.
-5. Add penalty and tax views.
-6. Add ML/DL prediction pages.
-7. Add cycle health and freshness page.
-8. Keep workbook generation as an export path only.
+4. Move hosted read paths from PostgreSQL to BigQuery.
+5. Add change-history drilldown.
+6. Add penalty and tax views.
+7. Add ML/DL prediction pages and route-winner views.
+8. Add cycle health and freshness page.
+9. Keep workbook generation as an export path only.
 
 ## Current File Role Assessment
 
@@ -81,4 +88,4 @@ The web app should support:
 
 ## Success Condition
 
-The web application becomes the main interactive monitor, while Excel remains a downloadable operational artifact and BigQuery becomes the historical analytics layer.
+The web application becomes the main interactive monitor, Excel remains a downloadable operational artifact, local PostgreSQL remains the collection/training store, and BigQuery becomes both the historical analytics layer and the hosted read layer.

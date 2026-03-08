@@ -346,6 +346,20 @@ def _serialize_warehouse_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, 
     return clean_rows
 
 
+def _iso_date(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value or "")
+
+
+def _iso_timestamp(value: Any) -> str:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value or "")
+
+
 def _get_latest_bundle_row(backtest_only: bool = False) -> dict[str, Any] | None:
     where_clause = "WHERE has_backtest_eval" if backtest_only else ""
     rows = _run_bigquery_query(
@@ -436,6 +450,38 @@ def _get_bundle_route_eval(bundle_id: str, limit_routes: int) -> list[dict[str, 
     return _serialize_warehouse_rows(rows)
 
 
+def _get_bundle_route_winners(bundle_id: str, limit_routes: int) -> list[dict[str, Any]]:
+    rows = _run_bigquery_query(
+        f"""
+        SELECT
+          airline,
+          origin,
+          destination,
+          route_key,
+          cabin,
+          winner_model,
+          winner_metric,
+          winner_n,
+          winner_mae,
+          winner_rmse,
+          winner_directional_accuracy_pct,
+          winner_f1_macro,
+          max_candidate_n,
+          coverage_threshold_n,
+          candidate_models
+        FROM {_bq_table("fact_forecast_route_winner")}
+        WHERE bundle_id = @bundle_id
+        ORDER BY winner_mae ASC NULLS LAST, airline, route_key, winner_model
+        LIMIT @row_limit
+        """,
+        [
+            bigquery.ScalarQueryParameter("bundle_id", "STRING", bundle_id),
+            bigquery.ScalarQueryParameter("row_limit", "INT64", limit_routes),
+        ],
+    )
+    return _serialize_warehouse_rows(rows)
+
+
 def _get_bundle_next_day(bundle_id: str, limit_next_day: int) -> list[dict[str, Any]]:
     rows = _run_bigquery_query(
         f"""
@@ -507,6 +553,38 @@ def _get_bundle_backtest_eval(bundle_id: str) -> list[dict[str, Any]]:
     return _serialize_warehouse_rows(rows)
 
 
+def _get_bundle_backtest_route_winners(bundle_id: str, limit_routes: int) -> list[dict[str, Any]]:
+    rows = _run_bigquery_query(
+        f"""
+        SELECT
+          split_id,
+          airline,
+          origin,
+          destination,
+          route_key,
+          cabin,
+          winner_model,
+          winner_metric,
+          winner_n,
+          winner_mae,
+          winner_rmse,
+          winner_directional_accuracy_pct,
+          winner_f1_macro,
+          dataset,
+          selected_on_val
+        FROM {_bq_table("fact_backtest_route_winner")}
+        WHERE bundle_id = @bundle_id
+        ORDER BY split_id DESC, winner_mae ASC NULLS LAST, airline, route_key
+        LIMIT @row_limit
+        """,
+        [
+            bigquery.ScalarQueryParameter("bundle_id", "STRING", bundle_id),
+            bigquery.ScalarQueryParameter("row_limit", "INT64", limit_routes),
+        ],
+    )
+    return _serialize_warehouse_rows(rows)
+
+
 def _build_backtest_meta(bundle: dict[str, Any]) -> dict[str, Any]:
     return {
         "target_column": bundle.get("target"),
@@ -535,8 +613,12 @@ def _materialize_bigquery_bundle(
         "modified_at_utc": bundle.get("bundle_created_at_utc"),
         "overall_eval": _get_bundle_model_eval(bundle_id),
         "route_eval": _get_bundle_route_eval(bundle_id, limit_routes),
+        "route_winners": _get_bundle_route_winners(bundle_id, limit_routes),
         "next_day": _get_bundle_next_day(bundle_id, limit_next_day),
         "backtest_eval": _get_bundle_backtest_eval(bundle_id) if bundle.get("has_backtest_eval") else [],
+        "backtest_route_winners": _get_bundle_backtest_route_winners(bundle_id, limit_routes)
+        if bundle.get("has_backtest_route_winner")
+        else [],
         "backtest_meta": _build_backtest_meta(bundle) if bundle.get("has_backtest_eval") else None,
     }
 
@@ -584,8 +666,10 @@ def _get_forecasting_payload_from_files(limit_routes: int = 25, limit_next_day: 
             "modified_at_utc": bundle["modified_at_utc"],
             "overall_eval": eval_rows,
             "route_eval": route_eval_rows,
+            "route_winners": [],
             "next_day": next_day_rows,
             "backtest_eval": backtest_eval_rows,
+            "backtest_route_winners": [],
             "backtest_meta": backtest_meta,
         }
 
@@ -750,6 +834,318 @@ def _departure_day_label(value: date | datetime | str | None) -> str:
         return ""
 
 
+def _build_route_monitor_matrix_from_aggregates(
+    resolved_cycle_id: str,
+    selected_routes: Sequence[dict[str, Any]],
+    current_rows: Sequence[dict[str, Any]],
+    history_rows: Sequence[dict[str, Any]],
+    history_limit: int,
+) -> dict[str, Any]:
+    if not current_rows:
+        return {"cycle_id": resolved_cycle_id, "routes": []}
+
+    route_date_map: dict[str, set[str]] = defaultdict(set)
+    flight_groups_by_route: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in current_rows:
+        route_key = str(row["route_key"])
+        dep_date_iso = _iso_date(row.get("departure_date"))
+        if not dep_date_iso:
+            continue
+        route_date_map[route_key].add(dep_date_iso)
+        normalized_row = dict(row)
+        normalized_row["departure_date"] = dep_date_iso
+        flight_group_id = _matrix_flight_group_id(normalized_row)
+        if flight_group_id not in flight_groups_by_route[route_key]:
+            flight_groups_by_route[route_key][flight_group_id] = {
+                "flight_group_id": flight_group_id,
+                "airline": normalized_row.get("airline"),
+                "flight_number": normalized_row.get("flight_number"),
+                "departure_time": normalized_row.get("departure_time"),
+                "cabin": normalized_row.get("cabin"),
+                "aircraft": normalized_row.get("aircraft"),
+            }
+
+    grouped_cell_history: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
+    captures_by_route_date: dict[tuple[str, str], set[str]] = defaultdict(set)
+
+    for row in history_rows:
+        route_key = str(row["route_key"])
+        dep_date_iso = _iso_date(row.get("departure_date"))
+        if dep_date_iso not in route_date_map.get(route_key, set()):
+            continue
+        normalized_row = dict(row)
+        normalized_row["departure_date"] = dep_date_iso
+        flight_group_id = _matrix_flight_group_id(normalized_row)
+        if flight_group_id not in flight_groups_by_route.get(route_key, {}):
+            continue
+        captured_at_iso = _iso_timestamp(row.get("captured_at_utc"))
+        normalized_row["flight_group_id"] = flight_group_id
+        normalized_row["captured_at_utc"] = captured_at_iso
+        captures_by_route_date[(route_key, dep_date_iso)].add(captured_at_iso)
+        grouped_cell_history[(route_key, dep_date_iso, flight_group_id)].append(normalized_row)
+
+    route_payloads: list[dict[str, Any]] = []
+    signal_counts: dict[str, int] = defaultdict(int)
+
+    for route_row in selected_routes:
+        route_key = str(route_row["route_key"])
+        flight_groups = sorted(
+            flight_groups_by_route.get(route_key, {}).values(),
+            key=lambda item: (
+                str(item.get("airline") or ""),
+                str(item.get("departure_time") or ""),
+                str(item.get("flight_number") or ""),
+            ),
+        )
+        date_groups: list[dict[str, Any]] = []
+        for dep_date in sorted(route_date_map.get(route_key, set())):
+            capture_times = sorted(captures_by_route_date.get((route_key, dep_date), set()), reverse=True)
+            if history_limit > 0:
+                capture_times = capture_times[:history_limit]
+            captures: list[dict[str, Any]] = []
+            for captured_at_iso in capture_times:
+                cells: list[dict[str, Any]] = []
+                for fg in flight_groups:
+                    fgid = fg["flight_group_id"]
+                    cell_history = sorted(
+                        grouped_cell_history.get((route_key, dep_date, fgid), []),
+                        key=lambda item: item.get("captured_at_utc") or "",
+                    )
+                    current_cell: dict[str, Any] | None = None
+                    previous_cell: dict[str, Any] | None = None
+                    for idx, candidate in enumerate(cell_history):
+                        if candidate.get("captured_at_utc") == captured_at_iso:
+                            current_cell = candidate
+                            previous_cell = cell_history[idx - 1] if idx > 0 else None
+                            break
+                    if not current_cell:
+                        continue
+                    signal = _cell_signal(previous_cell, current_cell)
+                    if captured_at_iso == capture_times[0]:
+                        signal_counts[signal] += 1
+                    cells.append(
+                        {
+                            "flight_group_id": fgid,
+                            "airline": current_cell.get("airline"),
+                            "min_total_price_bdt": current_cell.get("min_total_price_bdt"),
+                            "max_total_price_bdt": current_cell.get("max_total_price_bdt"),
+                            "tax_amount": current_cell.get("tax_amount"),
+                            "seat_available": current_cell.get("seat_available"),
+                            "seat_capacity": current_cell.get("seat_capacity"),
+                            "load_factor_pct": current_cell.get("load_factor_pct"),
+                            "soldout": current_cell.get("soldout"),
+                            "signal": signal,
+                        }
+                    )
+                captures.append(
+                    {
+                        "captured_at_utc": captured_at_iso,
+                        "is_latest": captured_at_iso == capture_times[0] if capture_times else False,
+                        "cells": cells,
+                    }
+                )
+            date_groups.append(
+                {
+                    "departure_date": dep_date,
+                    "day_label": _departure_day_label(dep_date),
+                    "captures": captures,
+                }
+            )
+
+        route_payloads.append(
+            {
+                "route_key": route_key,
+                "origin": route_row.get("origin"),
+                "destination": route_row.get("destination"),
+                "flight_groups": flight_groups,
+                "date_groups": date_groups,
+            }
+        )
+
+    return {
+        "cycle_id": resolved_cycle_id,
+        "routes": route_payloads,
+        "signal_counts": {key: signal_counts.get(key, 0) for key in sorted(signal_counts, key=_signal_sort_key)},
+    }
+
+
+def _resolve_cycle_id_bigquery(cycle_id: str | None) -> str | None:
+    if cycle_id:
+        return cycle_id.strip()
+    rows = _run_bigquery_query(
+        f"""
+        SELECT cycle_id
+        FROM {_bq_table("fact_cycle_run")}
+        QUALIFY ROW_NUMBER() OVER (ORDER BY cycle_completed_at_utc DESC, cycle_id DESC) = 1
+        """
+    )
+    return str(rows[0]["cycle_id"]) if rows else None
+
+
+def _get_route_monitor_matrix_from_bigquery(
+    cycle_id: str | None = None,
+    airlines: Sequence[str] | None = None,
+    origins: Sequence[str] | None = None,
+    destinations: Sequence[str] | None = None,
+    cabins: Sequence[str] | None = None,
+    route_limit: int = 8,
+    history_limit: int = 12,
+) -> dict[str, Any]:
+    resolved_cycle_id = _resolve_cycle_id_bigquery(cycle_id)
+    if not resolved_cycle_id:
+        return {"cycle_id": None, "routes": []}
+
+    route_filters = ["cycle_id = @cycle_id"]
+    route_params: list[bigquery.ScalarQueryParameter] = [
+        bigquery.ScalarQueryParameter("cycle_id", "STRING", resolved_cycle_id),
+        bigquery.ScalarQueryParameter("route_limit", "INT64", route_limit),
+    ]
+    if airlines:
+        route_filters.append("airline IN UNNEST(@airlines)")
+        route_params.append(bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines)))
+    if origins:
+        route_filters.append("origin IN UNNEST(@origins)")
+        route_params.append(bigquery.ArrayQueryParameter("origins", "STRING", _normalize_codes(origins)))
+    if destinations:
+        route_filters.append("destination IN UNNEST(@destinations)")
+        route_params.append(bigquery.ArrayQueryParameter("destinations", "STRING", _normalize_codes(destinations)))
+    if cabins:
+        route_filters.append("cabin IN UNNEST(@cabins)")
+        route_params.append(bigquery.ArrayQueryParameter("cabins", "STRING", _normalize_codes(cabins, uppercase=False)))
+
+    selected_routes = _serialize_warehouse_rows(
+        _run_bigquery_query(
+            f"""
+            SELECT
+              origin,
+              destination,
+              route_key,
+              COUNT(*) AS row_count
+            FROM {_bq_table("fact_offer_snapshot")}
+            WHERE {' AND '.join(route_filters)}
+            GROUP BY origin, destination, route_key
+            ORDER BY row_count DESC, route_key
+            LIMIT @route_limit
+            """,
+            route_params,
+        )
+    )
+    if not selected_routes:
+        return {"cycle_id": resolved_cycle_id, "routes": []}
+
+    route_keys = [str(row["route_key"]) for row in selected_routes]
+    current_params: list[bigquery.ScalarQueryParameter] = [
+        bigquery.ScalarQueryParameter("cycle_id", "STRING", resolved_cycle_id),
+        bigquery.ArrayQueryParameter("route_keys", "STRING", route_keys),
+    ]
+    current_filters = ["cycle_id = @cycle_id", "route_key IN UNNEST(@route_keys)"]
+    if airlines:
+        current_filters.append("airline IN UNNEST(@airlines)")
+        current_params.append(bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines)))
+    if cabins:
+        current_filters.append("cabin IN UNNEST(@cabins)")
+        current_params.append(bigquery.ArrayQueryParameter("cabins", "STRING", _normalize_codes(cabins, uppercase=False)))
+
+    current_rows = _serialize_warehouse_rows(
+        _run_bigquery_query(
+            f"""
+            SELECT
+              cycle_id,
+              captured_at_utc,
+              airline,
+              origin,
+              destination,
+              route_key,
+              flight_number,
+              departure_utc,
+              departure_date,
+              FORMAT_TIMESTAMP('%H:%M', departure_utc) AS departure_time,
+              cabin,
+              COALESCE(aircraft, '') AS aircraft,
+              MIN(total_price_bdt) AS min_total_price_bdt,
+              MAX(total_price_bdt) AS max_total_price_bdt,
+              MAX(tax_amount) AS tax_amount,
+              MIN(seat_available) AS seat_available,
+              MAX(seat_capacity) AS seat_capacity,
+              MAX(load_factor_pct) AS load_factor_pct,
+              LOGICAL_OR(IFNULL(soldout, FALSE)) AS soldout
+            FROM {_bq_table("fact_offer_snapshot")}
+            WHERE {' AND '.join(current_filters)}
+            GROUP BY
+              cycle_id, captured_at_utc, airline, origin, destination, route_key,
+              flight_number, departure_utc, departure_date, departure_time, cabin, aircraft
+            ORDER BY route_key, departure_date, departure_time, airline, flight_number
+            """,
+            current_params,
+        )
+    )
+    if not current_rows:
+        return {"cycle_id": resolved_cycle_id, "routes": []}
+
+    dep_dates = [_iso_date(row.get("departure_date")) for row in current_rows if _iso_date(row.get("departure_date"))]
+    min_date = min(dep_dates)
+    max_date = max(dep_dates)
+
+    history_params: list[bigquery.ScalarQueryParameter] = [
+        bigquery.ArrayQueryParameter("route_keys", "STRING", route_keys),
+        bigquery.ScalarQueryParameter("min_date", "DATE", min_date),
+        bigquery.ScalarQueryParameter("max_date", "DATE", max_date),
+    ]
+    history_filters = [
+        "route_key IN UNNEST(@route_keys)",
+        "departure_date >= @min_date",
+        "departure_date <= @max_date",
+    ]
+    if airlines:
+        history_filters.append("airline IN UNNEST(@airlines)")
+        history_params.append(bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines)))
+    if cabins:
+        history_filters.append("cabin IN UNNEST(@cabins)")
+        history_params.append(bigquery.ArrayQueryParameter("cabins", "STRING", _normalize_codes(cabins, uppercase=False)))
+
+    history_rows = _serialize_warehouse_rows(
+        _run_bigquery_query(
+            f"""
+            SELECT
+              cycle_id,
+              captured_at_utc,
+              airline,
+              origin,
+              destination,
+              route_key,
+              flight_number,
+              departure_utc,
+              departure_date,
+              FORMAT_TIMESTAMP('%H:%M', departure_utc) AS departure_time,
+              cabin,
+              COALESCE(aircraft, '') AS aircraft,
+              MIN(total_price_bdt) AS min_total_price_bdt,
+              MAX(total_price_bdt) AS max_total_price_bdt,
+              MAX(tax_amount) AS tax_amount,
+              MIN(seat_available) AS seat_available,
+              MAX(seat_capacity) AS seat_capacity,
+              MAX(load_factor_pct) AS load_factor_pct,
+              LOGICAL_OR(IFNULL(soldout, FALSE)) AS soldout
+            FROM {_bq_table("fact_offer_snapshot")}
+            WHERE {' AND '.join(history_filters)}
+            GROUP BY
+              cycle_id, captured_at_utc, airline, origin, destination, route_key,
+              flight_number, departure_utc, departure_date, departure_time, cabin, aircraft
+            ORDER BY captured_at_utc DESC, route_key, departure_date, departure_time, airline, flight_number
+            """,
+            history_params,
+        )
+    )
+
+    return _build_route_monitor_matrix_from_aggregates(
+        resolved_cycle_id=resolved_cycle_id,
+        selected_routes=selected_routes,
+        current_rows=current_rows,
+        history_rows=history_rows,
+        history_limit=history_limit,
+    )
+
+
 def _matrix_flight_group_id(row: dict[str, Any]) -> str:
     departure_time = str(row.get("departure_time") or "").strip()
     aircraft = str(row.get("aircraft") or "").strip().upper()
@@ -808,6 +1204,20 @@ def get_route_monitor_matrix(
     route_limit: int = 8,
     history_limit: int = 12,
 ) -> dict[str, Any]:
+    if _bigquery_ready():
+        try:
+            return _get_route_monitor_matrix_from_bigquery(
+                cycle_id=cycle_id,
+                airlines=airlines,
+                origins=origins,
+                destinations=destinations,
+                cabins=cabins,
+                route_limit=route_limit,
+                history_limit=history_limit,
+            )
+        except (GoogleAPIError, RuntimeError, ValueError):
+            pass
+
     resolved_cycle_id = _resolve_cycle_id(session, cycle_id)
     if not resolved_cycle_id:
         return {"cycle_id": None, "routes": []}
@@ -896,25 +1306,11 @@ def get_route_monitor_matrix(
     if not current_dicts:
         return {"cycle_id": resolved_cycle_id, "routes": []}
 
-    route_date_map: dict[str, set[str]] = defaultdict(set)
-    flight_groups_by_route: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     for row in current_dicts:
-        route_key = str(row["route_key"])
         dep_date = row.get("departure_date")
         if isinstance(dep_date, date):
-            route_date_map[route_key].add(dep_date.isoformat())
             min_date = dep_date if min_date is None or dep_date < min_date else min_date
             max_date = dep_date if max_date is None or dep_date > max_date else max_date
-        flight_group_id = _matrix_flight_group_id(row)
-        if flight_group_id not in flight_groups_by_route[route_key]:
-            flight_groups_by_route[route_key][flight_group_id] = {
-                "flight_group_id": flight_group_id,
-                "airline": row.get("airline"),
-                "flight_number": row.get("flight_number"),
-                "departure_time": row.get("departure_time"),
-                "cabin": row.get("cabin"),
-                "aircraft": row.get("aircraft"),
-            }
 
     if min_date is None or max_date is None:
         return {"cycle_id": resolved_cycle_id, "routes": []}
@@ -972,115 +1368,13 @@ def get_route_monitor_matrix(
     ).mappings().all()
     history_dicts = _rows_to_dicts([dict(row) for row in history_rows])
 
-    grouped_cell_history: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
-    captures_by_route_date: dict[tuple[str, str], set[str]] = defaultdict(set)
-
-    for row in history_dicts:
-        route_key = str(row["route_key"])
-        dep_date = row.get("departure_date")
-        if isinstance(dep_date, date):
-            dep_date_iso = dep_date.isoformat()
-        else:
-            dep_date_iso = str(dep_date)
-        if dep_date_iso not in route_date_map.get(route_key, set()):
-            continue
-        flight_group_id = _matrix_flight_group_id(row)
-        if flight_group_id not in flight_groups_by_route.get(route_key, {}):
-            continue
-        row["flight_group_id"] = flight_group_id
-        row["departure_date"] = dep_date_iso
-        captured_at = row.get("captured_at_utc")
-        captured_at_iso = captured_at.isoformat() if isinstance(captured_at, datetime) else str(captured_at)
-        row["captured_at_utc"] = captured_at_iso
-        captures_by_route_date[(route_key, dep_date_iso)].add(captured_at_iso)
-        grouped_cell_history[(route_key, dep_date_iso, flight_group_id)].append(row)
-
-    route_payloads: list[dict[str, Any]] = []
-    signal_counts: dict[str, int] = defaultdict(int)
-
-    for route_row in selected_routes:
-        route_key = str(route_row["route_key"])
-        flight_groups = sorted(
-            flight_groups_by_route.get(route_key, {}).values(),
-            key=lambda item: (
-                str(item.get("airline") or ""),
-                str(item.get("departure_time") or ""),
-                str(item.get("flight_number") or ""),
-            ),
-        )
-        date_groups: list[dict[str, Any]] = []
-        for dep_date in sorted(route_date_map.get(route_key, set())):
-            capture_times = sorted(captures_by_route_date.get((route_key, dep_date), set()), reverse=True)
-            if history_limit > 0:
-                capture_times = capture_times[:history_limit]
-            captures: list[dict[str, Any]] = []
-            for captured_at_iso in capture_times:
-                cells: list[dict[str, Any]] = []
-                for fg in flight_groups:
-                    fgid = fg["flight_group_id"]
-                    cell_history = sorted(
-                        grouped_cell_history.get((route_key, dep_date, fgid), []),
-                        key=lambda item: item.get("captured_at_utc") or "",
-                    )
-                    current_cell: dict[str, Any] | None = None
-                    previous_cell: dict[str, Any] | None = None
-                    for idx, candidate in enumerate(cell_history):
-                        if candidate.get("captured_at_utc") == captured_at_iso:
-                            current_cell = candidate
-                            previous_cell = cell_history[idx - 1] if idx > 0 else None
-                            break
-                    if not current_cell:
-                        continue
-                    signal = _cell_signal(previous_cell, current_cell)
-                    if captured_at_iso == capture_times[0]:
-                        signal_counts[signal] += 1
-                    cells.append(
-                        {
-                            "flight_group_id": fgid,
-                            "airline": current_cell.get("airline"),
-                            "min_total_price_bdt": current_cell.get("min_total_price_bdt"),
-                            "max_total_price_bdt": current_cell.get("max_total_price_bdt"),
-                            "tax_amount": current_cell.get("tax_amount"),
-                            "seat_available": current_cell.get("seat_available"),
-                            "seat_capacity": current_cell.get("seat_capacity"),
-                            "load_factor_pct": current_cell.get("load_factor_pct"),
-                            "soldout": current_cell.get("soldout"),
-                            "signal": signal,
-                        }
-                    )
-                captures.append(
-                    {
-                        "captured_at_utc": captured_at_iso,
-                        "is_latest": captured_at_iso == capture_times[0] if capture_times else False,
-                        "cells": cells,
-                    }
-                )
-            date_groups.append(
-                {
-                    "departure_date": dep_date,
-                    "day_label": _departure_day_label(dep_date),
-                    "captures": captures,
-                }
-            )
-
-        route_payloads.append(
-            {
-                "route_key": route_key,
-                "origin": route_row.get("origin"),
-                "destination": route_row.get("destination"),
-                "flight_groups": flight_groups,
-                "date_groups": date_groups,
-            }
-        )
-
-    return {
-        "cycle_id": resolved_cycle_id,
-        "routes": route_payloads,
-        "signal_counts": {
-            key: signal_counts.get(key, 0)
-            for key in [signal for signal, _ in sorted(signal_counts.items(), key=lambda item: _signal_sort_key(item[0]))]
-        },
-    }
+    return _build_route_monitor_matrix_from_aggregates(
+        resolved_cycle_id=resolved_cycle_id,
+        selected_routes=selected_routes,
+        current_rows=current_dicts,
+        history_rows=history_dicts,
+        history_limit=history_limit,
+    )
 
 
 def get_route_summary(

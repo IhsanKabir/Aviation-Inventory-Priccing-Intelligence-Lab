@@ -95,6 +95,14 @@ export default async function ForecastingPage() {
   const routeEval = latestPrediction?.route_eval ?? [];
   const harderRoutes = rankByMetric(routeEval, "mae", "desc").filter((row) => (toNumber(row.n) ?? 0) >= 5).slice(0, 8);
   const cleanerRoutes = rankByMetric(routeEval, "mae", "asc").filter((row) => (toNumber(row.n) ?? 0) >= 5).slice(0, 8);
+  const routeWinners = [...(latestPrediction?.route_winners ?? [])]
+    .filter((row) => (toNumber(row.winner_n) ?? 0) >= 5)
+    .sort((left, right) => (toNumber(left.winner_mae) ?? 999999) - (toNumber(right.winner_mae) ?? 999999))
+    .slice(0, 10);
+  const backtestRouteWinners = [...(latestBacktest?.backtest_route_winners ?? [])]
+    .filter((row) => (toNumber(row.winner_n) ?? 0) >= 5)
+    .sort((left, right) => (toNumber(left.winner_mae) ?? 999999) - (toNumber(right.winner_mae) ?? 999999))
+    .slice(0, 10);
   const bestPredictionMae = overallEval[0] ?? null;
   const bestDirectional = rankByMetric(latestPrediction?.overall_eval, "directional_accuracy_pct", "desc")[0] ?? null;
   const nextDayWatchlist = buildNextDayWatchlist(latestPrediction?.next_day).slice(0, 12);
@@ -300,6 +308,84 @@ export default async function ForecastingPage() {
                     <span>{formatPercent(toNumber(row.directional_accuracy_pct))}</span>
                   </div>
                 ))}
+              </div>
+            )}
+          </DataPanel>
+        </div>
+
+        <div className="section-grid forecast-grid-split">
+          <DataPanel
+            title="Current route winners"
+            copy="Per-route winning model from the latest prediction bundle. This is the operational ML/DL selection layer."
+          >
+            {!routeWinners.length ? (
+              <div className="empty-state">No route-winner rows available in the latest prediction bundle.</div>
+            ) : (
+              <div className="data-table-wrap">
+                <table className="data-table compact-table forecasting-table">
+                  <thead>
+                    <tr>
+                      <th>Route</th>
+                      <th>Airline</th>
+                      <th>Cabin</th>
+                      <th>Winner model</th>
+                      <th>N</th>
+                      <th>MAE</th>
+                      <th>Directional accuracy</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {routeWinners.map((row, index) => (
+                      <tr key={`${String(row.airline)}-${String(row.route_key)}-${String(row.winner_model)}-${index}`}>
+                        <td>{String(row.route_key ?? `${String(row.origin ?? "-")}-${String(row.destination ?? "-")}`)}</td>
+                        <td>{String(row.airline ?? "-")}</td>
+                        <td>{String(row.cabin ?? "-")}</td>
+                        <td>{formatModelName(row.winner_model)}</td>
+                        <td>{formatNumber(toNumber(row.winner_n))}</td>
+                        <td>{formatNumber(toNumber(row.winner_mae))}</td>
+                        <td>{formatPercent(toNumber(row.winner_directional_accuracy_pct))}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </DataPanel>
+
+          <DataPanel
+            title="Backtest route winners"
+            copy="Route-level winners confirmed during backtest windows. Use this to judge whether the current winning model is stable, not accidental."
+          >
+            {!backtestRouteWinners.length ? (
+              <div className="empty-state">No backtest route-winner rows available in the latest backtest bundle.</div>
+            ) : (
+              <div className="data-table-wrap">
+                <table className="data-table compact-table forecasting-table">
+                  <thead>
+                    <tr>
+                      <th>Split</th>
+                      <th>Route</th>
+                      <th>Dataset</th>
+                      <th>Winner model</th>
+                      <th>N</th>
+                      <th>MAE</th>
+                      <th>Selected on val</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {backtestRouteWinners.map((row, index) => (
+                      <tr key={`${String(row.split_id)}-${String(row.route_key)}-${String(row.winner_model)}-${index}`}>
+                        <td>{String(row.split_id ?? "-")}</td>
+                        <td>{String(row.route_key ?? `${String(row.origin ?? "-")}-${String(row.destination ?? "-")}`)}</td>
+                        <td>{String(row.dataset ?? "-")}</td>
+                        <td>{formatModelName(row.winner_model)}</td>
+                        <td>{formatNumber(toNumber(row.winner_n))}</td>
+                        <td>{formatNumber(toNumber(row.winner_mae))}</td>
+                        <td>{row.selected_on_val ? "Yes" : "No"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
           </DataPanel>

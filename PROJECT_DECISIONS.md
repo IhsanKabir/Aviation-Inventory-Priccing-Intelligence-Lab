@@ -115,7 +115,8 @@ Include over time:
 ### Infrastructure Constraints
 
 - Current environment: local laptop
-- Database: PostgreSQL
+- Operational database: local PostgreSQL
+- Hosted read warehouse: BigQuery sandbox
 - Budget: zero (prefer free/open-source stack)
 
 ### Timeline
@@ -165,16 +166,18 @@ Always compare models against:
 - Ingestion: airline-specific connectors (modular)
 - Standardization: canonical schema + raw payload archive
 - Storage:
-  - PostgreSQL for normalized facts/events
+  - local PostgreSQL for normalized facts/events, comparisons, and ML/DL training
   - Compressed JSON archive for raw payload lineage
+  - BigQuery for curated hosted reads, forecasting outputs, and BI
 - Processing layers:
   - Snapshot builder
   - Column-level diff engine
   - Event/alert engine
-  - Forecast engine
+  - Forecast engine (ML + DL)
 - Delivery:
   - On-demand report generator (Excel/CSV/JSON)
-  - Optional lightweight API/dashboard later
+  - FastAPI + Next.js hosted monitor
+  - Looker Studio dashboards over BigQuery
 
 ## 5) Data Governance and Risk Note
 
@@ -668,7 +671,8 @@ Implementation status (2026-02-23):
 - Primary interactive product will move to:
   - FastAPI reporting API
   - Next.js frontend
-  - PostgreSQL as the operational source of truth
+  - BigQuery-backed hosted reads for public/runtime pages
+- Local PostgreSQL remains the operational write and training store on the collection machine.
 
 ### Analytics and BI
 
@@ -676,6 +680,14 @@ Implementation status (2026-02-23):
   - BigQuery sandbox dataset
   - Looker Studio dashboards
 - Curated facts will be exported from PostgreSQL to BigQuery on a scheduled basis.
+- ML/DL outputs that must live in the warehouse:
+  - forecast bundle summaries
+  - model evaluation
+  - route evaluation
+  - route winner tables
+  - next-day predictions
+  - backtest evaluation
+  - backtest route winner tables
 
 ### Public Repository Wording
 

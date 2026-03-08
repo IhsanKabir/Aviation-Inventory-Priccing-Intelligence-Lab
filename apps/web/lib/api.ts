@@ -225,6 +225,28 @@ export type ForecastMetricRow = {
   [key: string]: unknown;
 };
 
+export type ForecastRouteWinnerRow = {
+  airline?: string | null;
+  origin?: string | null;
+  destination?: string | null;
+  route_key?: string | null;
+  cabin?: string | null;
+  winner_model?: string | null;
+  winner_metric?: string | null;
+  winner_n?: number | null;
+  winner_mae?: number | null;
+  winner_rmse?: number | null;
+  winner_directional_accuracy_pct?: number | null;
+  winner_f1_macro?: number | null;
+  max_candidate_n?: number | null;
+  coverage_threshold_n?: number | null;
+  candidate_models?: number | null;
+  split_id?: number | null;
+  dataset?: string | null;
+  selected_on_val?: boolean | null;
+  [key: string]: unknown;
+};
+
 export type ForecastBundle = {
   bundle_dir: string;
   bundle_name: string;
@@ -233,8 +255,10 @@ export type ForecastBundle = {
   modified_at_utc?: string | null;
   overall_eval: ForecastMetricRow[];
   route_eval: ForecastMetricRow[];
+  route_winners: ForecastRouteWinnerRow[];
   next_day: Array<Record<string, unknown>>;
   backtest_eval: ForecastMetricRow[];
+  backtest_route_winners: ForecastRouteWinnerRow[];
   backtest_meta?: Record<string, unknown> | null;
 };
 

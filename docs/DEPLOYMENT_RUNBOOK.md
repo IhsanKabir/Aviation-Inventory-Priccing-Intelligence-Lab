@@ -4,8 +4,8 @@ This system should be deployed as a split stack:
 
 - `apps/web` on Vercel
 - `apps/api` on Google Cloud Run
-- PostgreSQL on a managed provider
-- BigQuery + Looker Studio remain the analytics layer
+- local PostgreSQL remains on the collection/training machine
+- BigQuery + Looker Studio remain the hosted analytics and forecasting layer
 
 GitHub is source control and CI, not the runtime host.
 
@@ -24,20 +24,18 @@ GitHub is source control and CI, not the runtime host.
 - Platform: Google Cloud Run
 - Container source: `apps/api/Dockerfile`
 - Runtime env:
-  - `AIRLINE_DB_URL`
   - `API_CORS_ORIGINS`
   - `API_FORECASTING_SOURCE=bigquery`
   - `BIGQUERY_PROJECT_ID=aeropulseintelligence`
   - `BIGQUERY_DATASET=aviation_intel`
+  - `AIRLINE_DB_URL` only while any hosted endpoint still needs PostgreSQL
 
 ### Database
 
-- Use managed PostgreSQL
-- Preferred options:
-  - Cloud SQL
-  - Neon
-  - Supabase
-  - Railway Postgres
+- No-cost recommended path:
+  - keep PostgreSQL local for ingestion, comparisons, and ML/DL training
+- Optional later:
+  - move the operational write path to managed PostgreSQL if full hosted writes are required
 
 ### Warehouse / BI
 
@@ -49,7 +47,6 @@ GitHub is source control and CI, not the runtime host.
 GitHub Pages can only host static content. This project depends on:
 
 - server-side API execution
-- PostgreSQL access
 - BigQuery access
 - authenticated runtime environment variables
 
@@ -71,7 +68,7 @@ Use Cloud Run with a dedicated service account.
 Important:
 - do not deploy the API with a downloaded Google JSON key
 - grant the Cloud Run service account BigQuery read access instead
-- keep `AIRLINE_DB_URL` in Secret Manager
+- keep `AIRLINE_DB_URL` in Secret Manager only if any hosted endpoint still depends on PostgreSQL
 
 ## Environment variable map
 
@@ -82,13 +79,13 @@ Important:
 
 ### Cloud Run
 
-- `AIRLINE_DB_URL=postgresql+psycopg2://...`
 - `API_CORS_ORIGINS=https://YOUR_VERCEL_DOMAIN.vercel.app`
 - `API_DEFAULT_LIMIT=250`
 - `API_MAX_LIMIT=5000`
 - `API_FORECASTING_SOURCE=bigquery`
 - `BIGQUERY_PROJECT_ID=aeropulseintelligence`
 - `BIGQUERY_DATASET=aviation_intel`
+- `AIRLINE_DB_URL=postgresql+psycopg2://...` only during transition for endpoints not yet migrated to BigQuery
 
 ## Vercel setup checklist
 
@@ -106,7 +103,7 @@ Important:
 4. Grant:
    - BigQuery Data Viewer
    - BigQuery Job User
-5. Put `AIRLINE_DB_URL` into Secret Manager
+5. Put `AIRLINE_DB_URL` into Secret Manager only if any hosted endpoint still uses PostgreSQL
 6. Deploy Cloud Run service using [apps/api/cloudrun.service.yaml](../apps/api/cloudrun.service.yaml)
 7. Set `API_CORS_ORIGINS` to the real Vercel domain
 
@@ -123,8 +120,4 @@ Important:
 
 ## Database migration
 
-If the app still uses local PostgreSQL, migrate first.
-
-Preferred first path:
-
-- [NEON_MIGRATION_RUNBOOK.md](NEON_MIGRATION_RUNBOOK.md)
+If you want a zero-cost hosted read path, do not migrate the full local PostgreSQL database. Keep collection and training local, export curated tables into BigQuery, and let the hosted API read from BigQuery.

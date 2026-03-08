@@ -106,8 +106,10 @@ Minimum checks:
    - `fact_forecast_bundle`
    - `fact_forecast_model_eval`
    - `fact_forecast_route_eval`
+   - `fact_forecast_route_winner`
    - `fact_forecast_next_day`
    - `fact_backtest_eval`
+   - `fact_backtest_route_winner`
    - `fact_backtest_split`
 6. Looker-facing views resolve without errors:
    - `vw_cycle_health`
@@ -117,8 +119,10 @@ Minimum checks:
    - `vw_tax_reference`
    - `vw_forecast_model_latest`
    - `vw_forecast_route_latest`
+   - `vw_forecast_route_winner_latest`
    - `vw_forecast_next_day_latest`
    - `vw_backtest_eval_latest`
+   - `vw_backtest_route_winner_latest`
 
 ## Step 10: Connect Looker Studio
 
@@ -143,4 +147,5 @@ Live forecast review report already created:
 
 1. keep loading parquet from local first
 2. validate schemas and row counts
-3. only then automate scheduled export/load
+3. validate hosted API reads against BigQuery
+4. only then automate scheduled export/load
