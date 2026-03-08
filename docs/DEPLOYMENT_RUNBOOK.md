@@ -143,3 +143,24 @@ GitHub Actions alternative:
 ## Database migration
 
 If you want a zero-cost hosted read path, do not migrate the full local PostgreSQL database. Keep collection and training local, export curated tables into BigQuery, and let the hosted API read from BigQuery.
+
+## Automatic warehouse sync after scheduler runs
+
+`run_pipeline.py` now supports automatic BigQuery sync after a successful cycle.
+
+Behavior:
+
+- enabled when `BIGQUERY_PROJECT_ID` and `BIGQUERY_DATASET` are configured
+- skipped when `--skip-bigquery-sync` is used
+- exports a rolling recent UTC capture-date window, then loads BigQuery
+- does not fail the entire pipeline by default if warehouse sync fails
+
+Useful controls:
+
+```powershell
+.\.venv\Scripts\python.exe run_pipeline.py --bigquery-sync-lookback-days 7
+.\.venv\Scripts\python.exe run_pipeline.py --skip-bigquery-sync
+.\.venv\Scripts\python.exe run_pipeline.py --fail-on-bigquery-sync-error
+```
+
+This keeps BigQuery-backed hosted pages closer to the latest local collection cycle without requiring a separate manual sync step after every scheduler run.

@@ -50,7 +50,7 @@ Core project decisions and operating policy live in:
 3. Group parallel airline runs into one shared `cycle_id`.
 4. Compare current vs previous cycle snapshots.
 5. Generate operational Excel outputs, API-ready reporting views, and forecasting artifacts.
-6. Export curated facts plus ML/DL forecast outputs to BigQuery for hosted reads, BI, and long-horizon analytics.
+6. After successful pipeline runs, export/load a rolling recent capture window into BigQuery for hosted reads, BI, and long-horizon analytics.
 
 ## Target Platform Split
 
@@ -95,6 +95,20 @@ Run the full pipeline:
 
 ```powershell
 .\.venv\Scripts\python.exe run_pipeline.py --route-monitor --route-monitor-macro-xlsm
+```
+
+Automatic BigQuery sync now runs after a successful `run_pipeline.py` execution when:
+
+- `BIGQUERY_PROJECT_ID` is configured
+- `BIGQUERY_DATASET` is configured
+- `--skip-bigquery-sync` is not used
+
+Useful controls:
+
+```powershell
+.\.venv\Scripts\python.exe run_pipeline.py --bigquery-sync-lookback-days 7
+.\.venv\Scripts\python.exe run_pipeline.py --skip-bigquery-sync
+.\.venv\Scripts\python.exe run_pipeline.py --fail-on-bigquery-sync-error
 ```
 
 Generate reports only:

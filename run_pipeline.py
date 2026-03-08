@@ -147,6 +147,39 @@ def parse_args():
     parser.add_argument("--alert-sellout-false-alarm-cost", type=float, default=2.0)
     parser.add_argument("--alert-sellout-missed-cost", type=float, default=8.0)
 
+    # warehouse sync
+    parser.add_argument(
+        "--skip-bigquery-sync",
+        action="store_true",
+        help="Skip automatic BigQuery warehouse sync after a successful pipeline run.",
+    )
+    parser.add_argument(
+        "--bigquery-sync-lookback-days",
+        type=int,
+        default=max(1, int(os.getenv("BIGQUERY_SYNC_LOOKBACK_DAYS", "7"))),
+        help="Rolling UTC capture-date window exported to BigQuery after a successful run (default: 7 days).",
+    )
+    parser.add_argument(
+        "--bigquery-sync-output-dir",
+        default=os.getenv("BIGQUERY_SYNC_OUTPUT_DIR", "output/warehouse/bigquery"),
+        help="Base output directory for staged BigQuery parquet exports.",
+    )
+    parser.add_argument(
+        "--bigquery-project-id",
+        default=os.getenv("BIGQUERY_PROJECT_ID", "").strip() or None,
+        help="BigQuery project id for automatic warehouse sync.",
+    )
+    parser.add_argument(
+        "--bigquery-dataset",
+        default=os.getenv("BIGQUERY_DATASET", "").strip() or None,
+        help="BigQuery dataset for automatic warehouse sync.",
+    )
+    parser.add_argument(
+        "--fail-on-bigquery-sync-error",
+        action="store_true",
+        help="Fail the overall pipeline if the automatic BigQuery sync step fails.",
+    )
+
     parser.add_argument("--fail-fast", action="store_true", help="Stop immediately on first step failure")
     return parser.parse_args()
 
@@ -979,6 +1012,36 @@ def build_intelligence_hub_cmd(args):
     return cmd
 
 
+def _bigquery_sync_is_configured(args) -> bool:
+    return bool((args.bigquery_project_id or "").strip() and (args.bigquery_dataset or "").strip())
+
+
+def _bigquery_sync_window(args) -> tuple[str, str]:
+    end_date = dt.datetime.now(dt.timezone.utc).date() + dt.timedelta(days=1)
+    start_date = end_date - dt.timedelta(days=max(1, int(args.bigquery_sync_lookback_days or 1)))
+    return start_date.isoformat(), end_date.isoformat()
+
+
+def build_bigquery_sync_cmd(args) -> list[str]:
+    start_date, end_date = _bigquery_sync_window(args)
+    cmd = [
+        args.python_exe,
+        str(REPO_ROOT / "tools" / "export_bigquery_stage.py"),
+        "--output-dir",
+        args.bigquery_sync_output_dir,
+        "--start-date",
+        start_date,
+        "--end-date",
+        end_date,
+        "--load-bigquery",
+        "--project-id",
+        str(args.bigquery_project_id),
+        "--dataset",
+        str(args.bigquery_dataset),
+    ]
+    return cmd
+
+
 def main():
     args = parse_args()
     args.adt = max(1, int(args.adt or 1))
@@ -1041,6 +1104,36 @@ def main():
             pipeline_rc = rc or pipeline_rc
             if args.fail_fast:
                 return pipeline_rc
+
+    if pipeline_rc == 0 and not args.skip_bigquery_sync:
+        if _bigquery_sync_is_configured(args):
+            start_date, end_date = _bigquery_sync_window(args)
+            LOG.info(
+                "Automatic BigQuery sync enabled: project=%s dataset=%s window=%s..%s output_dir=%s",
+                args.bigquery_project_id,
+                args.bigquery_dataset,
+                start_date,
+                end_date,
+                args.bigquery_sync_output_dir,
+            )
+            rc = _run_step("bigquery_sync", build_bigquery_sync_cmd(args))
+            if rc != 0:
+                if args.fail_on_bigquery_sync_error:
+                    pipeline_rc = rc or pipeline_rc
+                    if args.fail_fast:
+                        return pipeline_rc
+                else:
+                    LOG.warning(
+                        "Automatic BigQuery sync failed rc=%s but pipeline result is preserved. "
+                        "Use --fail-on-bigquery-sync-error to make this blocking.",
+                        rc,
+                    )
+        else:
+            LOG.info(
+                "Skipping automatic BigQuery sync because BIGQUERY project/dataset are not configured."
+            )
+    elif args.skip_bigquery_sync:
+        LOG.info("Skipping automatic BigQuery sync by request.")
 
     after_count = _count_column_events(args.db_url)
     if before_count is not None and after_count is not None:

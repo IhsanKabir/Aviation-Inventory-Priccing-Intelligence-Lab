@@ -679,7 +679,8 @@ Implementation status (2026-02-23):
 - Historical analytics layer will move to:
   - BigQuery sandbox dataset
   - Looker Studio dashboards
-- Curated facts will be exported from PostgreSQL to BigQuery on a scheduled basis.
+- Curated facts are exported from PostgreSQL to BigQuery after successful `run_pipeline.py` cycles using a rolling recent capture-date window.
+- Manual/off-cycle warehouse refresh still remains available through `tools/export_bigquery_stage.py`.
 - ML/DL outputs that must live in the warehouse:
   - forecast bundle summaries
   - model evaluation

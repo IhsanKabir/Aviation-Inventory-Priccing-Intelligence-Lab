@@ -148,7 +148,21 @@ Live forecast review report already created:
 1. keep loading parquet from local first
 2. validate schemas and row counts
 3. validate hosted API reads against BigQuery
-4. only then automate scheduled export/load
+4. enable automatic post-cycle sync through `run_pipeline.py`
+
+Automatic post-cycle sync controls:
+
+```powershell
+.\.venv\Scripts\python.exe run_pipeline.py --bigquery-sync-lookback-days 7
+.\.venv\Scripts\python.exe run_pipeline.py --skip-bigquery-sync
+.\.venv\Scripts\python.exe run_pipeline.py --fail-on-bigquery-sync-error
+```
+
+Default behavior after this integration:
+
+- if `BIGQUERY_PROJECT_ID` and `BIGQUERY_DATASET` are configured, successful pipeline runs also refresh BigQuery
+- the sync window is recent UTC capture dates, not just the single latest cycle id
+- manual `tools/export_bigquery_stage.py --load-bigquery ...` remains available for backfills
 
 ## Hosted API note
 
