@@ -145,8 +145,11 @@ CREATE TABLE IF NOT EXISTS `aeropulseintelligence.aviation_intel.fact_forecast_b
   bundle_created_at_utc TIMESTAMP,
   has_overall_eval BOOL,
   has_route_eval BOOL,
+  has_route_winner BOOL,
   has_next_day BOOL,
   has_backtest_eval BOOL,
+  has_backtest_route_eval BOOL,
+  has_backtest_route_winner BOOL,
   has_backtest_splits BOOL,
   has_backtest_meta BOOL,
   target_column STRING,
@@ -203,6 +206,31 @@ CREATE TABLE IF NOT EXISTS `aeropulseintelligence.aviation_intel.fact_forecast_r
 )
 PARTITION BY DATE(bundle_created_at_utc)
 CLUSTER BY target, airline, route_key, model;
+
+CREATE TABLE IF NOT EXISTS `aeropulseintelligence.aviation_intel.fact_forecast_route_winner` (
+  bundle_id STRING NOT NULL,
+  bundle_name STRING NOT NULL,
+  target STRING NOT NULL,
+  stamp STRING NOT NULL,
+  bundle_created_at_utc TIMESTAMP,
+  airline STRING,
+  origin STRING,
+  destination STRING,
+  route_key STRING,
+  cabin STRING,
+  winner_model STRING,
+  winner_metric STRING,
+  winner_n INT64,
+  winner_mae NUMERIC,
+  winner_rmse NUMERIC,
+  winner_directional_accuracy_pct NUMERIC,
+  winner_f1_macro NUMERIC,
+  max_candidate_n INT64,
+  coverage_threshold_n INT64,
+  candidate_models INT64
+)
+PARTITION BY DATE(bundle_created_at_utc)
+CLUSTER BY target, airline, route_key, winner_model;
 
 CREATE TABLE IF NOT EXISTS `aeropulseintelligence.aviation_intel.fact_forecast_next_day` (
   bundle_id STRING NOT NULL,
@@ -266,6 +294,32 @@ CREATE TABLE IF NOT EXISTS `aeropulseintelligence.aviation_intel.fact_backtest_e
 )
 PARTITION BY DATE(bundle_created_at_utc)
 CLUSTER BY target, dataset, model;
+
+CREATE TABLE IF NOT EXISTS `aeropulseintelligence.aviation_intel.fact_backtest_route_winner` (
+  bundle_id STRING NOT NULL,
+  bundle_name STRING NOT NULL,
+  target STRING NOT NULL,
+  stamp STRING NOT NULL,
+  bundle_created_at_utc TIMESTAMP,
+  dataset STRING,
+  airline STRING,
+  origin STRING,
+  destination STRING,
+  route_key STRING,
+  cabin STRING,
+  winner_model STRING,
+  winner_metric STRING,
+  winner_n INT64,
+  winner_mae NUMERIC,
+  winner_rmse NUMERIC,
+  winner_directional_accuracy_pct NUMERIC,
+  winner_f1_macro NUMERIC,
+  max_candidate_n INT64,
+  coverage_threshold_n INT64,
+  candidate_models INT64
+)
+PARTITION BY DATE(bundle_created_at_utc)
+CLUSTER BY target, dataset, airline, route_key, winner_model;
 
 CREATE TABLE IF NOT EXISTS `aeropulseintelligence.aviation_intel.fact_backtest_split` (
   bundle_id STRING NOT NULL,

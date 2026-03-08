@@ -97,8 +97,8 @@ def parse_args():
     parser.add_argument("--disable-backtest", action="store_true", help="Skip rolling-window backtest artifacts")
     parser.add_argument(
         "--ml-models",
-        default="none",
-        help="Comma-separated optional ML models: catboost,lightgbm (default: none)",
+        default="catboost,lightgbm",
+        help="Comma-separated optional ML models: catboost,lightgbm (default: catboost,lightgbm)",
     )
     parser.add_argument(
         "--ml-quantiles",
@@ -1144,6 +1144,60 @@ def _best_model_from_eval(eval_rows: pd.DataFrame, *, metric: str = "mae", min_c
     return str(candidates.iloc[0]["model"])
 
 
+def build_winner_table(
+    eval_rows: pd.DataFrame,
+    *,
+    scope_cols: list[str],
+    metric: str = "mae",
+    min_coverage_ratio: float = 0.8,
+    extra_group_cols: list[str] | None = None,
+):
+    if eval_rows is None or eval_rows.empty:
+        return pd.DataFrame()
+
+    metric = "rmse" if str(metric or "").lower() == "rmse" else "mae"
+    extra_group_cols = extra_group_cols or []
+    work = eval_rows.copy()
+    required = [col for col in scope_cols + extra_group_cols if col in work.columns]
+    if not required or "model" not in work.columns or metric not in work.columns or "n" not in work.columns:
+        return pd.DataFrame()
+
+    winners: list[dict[str, Any]] = []
+    for group_key, part in work.groupby(required, dropna=False):
+        part = part[(part["n"] > 0) & part[metric].notna()].copy()
+        if part.empty:
+            continue
+        max_n = int(part["n"].max())
+        keep_n = int(max_n * float(max(0.0, min(1.0, min_coverage_ratio))))
+        covered = part[part["n"] >= keep_n].copy()
+        if not covered.empty:
+            part = covered
+        sort_cols = [metric, "rmse" if metric != "rmse" and "rmse" in part.columns else metric, "model"]
+        winner = part.sort_values(sort_cols).iloc[0]
+        row = {}
+        if len(required) == 1:
+            row[required[0]] = group_key
+        else:
+            for idx, col in enumerate(required):
+                row[col] = group_key[idx]
+        row.update(
+            {
+                "winner_model": winner["model"],
+                "winner_metric": metric,
+                "winner_n": winner["n"],
+                "winner_mae": winner.get("mae"),
+                "winner_rmse": winner.get("rmse"),
+                "winner_directional_accuracy_pct": winner.get("directional_accuracy_pct"),
+                "winner_f1_macro": winner.get("f1_macro"),
+                "max_candidate_n": max_n,
+                "coverage_threshold_n": keep_n,
+                "candidate_models": int(len(part)),
+            }
+        )
+        winners.append(row)
+    return pd.DataFrame(winners)
+
+
 def _build_backtest_splits(
     min_day,
     max_day,
@@ -1226,7 +1280,7 @@ def run_rolling_backtest(
     df = _normalize_report_day(history_df)
     df = df[df["report_day"].notna()].copy()
     if df.empty:
-        return pd.DataFrame(), pd.DataFrame(), {}
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
 
     min_day = df["report_day"].min()
     max_day = df["report_day"].max()
@@ -1263,10 +1317,11 @@ def run_rolling_backtest(
             "step_days": int(step_days),
             "split_count": 0,
         }
-        return pd.DataFrame(), pd.DataFrame(), meta
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), meta
 
     metric_rows = []
     split_rows = []
+    route_metric_rows = []
 
     for split in splits:
         train_mask = (df["report_day"] >= split["train_start"]) & (df["report_day"] <= split["train_end"])
@@ -1277,8 +1332,8 @@ def run_rolling_backtest(
         val_df = df[val_mask].copy()
         test_df = df[test_mask].copy()
 
-        val_eval, _ = evaluate_predictions(val_df, target=target, pred_cols=pred_cols, group_cols=group_cols)
-        test_eval, _ = evaluate_predictions(test_df, target=target, pred_cols=pred_cols, group_cols=group_cols)
+        val_eval, val_route_eval = evaluate_predictions(val_df, target=target, pred_cols=pred_cols, group_cols=group_cols)
+        test_eval, test_route_eval = evaluate_predictions(test_df, target=target, pred_cols=pred_cols, group_cols=group_cols)
         selected_model = _best_model_from_eval(
             val_eval,
             metric=selection_metric,
@@ -1330,8 +1385,38 @@ def run_rolling_backtest(
                     }
                 )
 
+        for dataset_name, route_frame in (("val", val_route_eval), ("test", test_route_eval)):
+            if route_frame.empty:
+                continue
+            for _, row in route_frame.iterrows():
+                route_metric_rows.append(
+                    {
+                        "split_id": split["split_id"],
+                        "dataset": dataset_name,
+                        **{col: row.get(col) for col in group_cols},
+                        "model": row["model"],
+                        "n": row["n"],
+                        "mae": row["mae"],
+                        "rmse": row["rmse"],
+                        "mape_pct": row["mape_pct"],
+                        "smape_pct": row["smape_pct"],
+                        "n_directional": row["n_directional"],
+                        "directional_accuracy_pct": row["directional_accuracy_pct"],
+                        "f1_up": row["f1_up"],
+                        "f1_down": row["f1_down"],
+                        "f1_macro": row["f1_macro"],
+                        "train_start": split["train_start"],
+                        "train_end": split["train_end"],
+                        "val_start": split["val_start"],
+                        "val_end": split["val_end"],
+                        "test_start": split["test_start"],
+                        "test_end": split["test_end"],
+                    }
+                )
+
     split_df = pd.DataFrame(split_rows)
     metric_df = pd.DataFrame(metric_rows)
+    route_metric_df = pd.DataFrame(route_metric_rows)
     meta = {
         "status": "ok_auto_window" if auto_window else "ok",
         "min_day": str(min_day),
@@ -1347,10 +1432,11 @@ def run_rolling_backtest(
         "step_days": int(auto_window["step_days"]) if auto_window else int(step_days),
         "split_count": int(len(split_rows)),
         "metric_rows": int(len(metric_rows)),
+        "route_metric_rows": int(len(route_metric_rows)),
         "selection_metric": str(selection_metric),
         "model_min_coverage_ratio": float(model_min_coverage_ratio),
     }
-    return metric_df, split_df, meta
+    return metric_df, split_df, route_metric_df, meta
 
 
 def main():
@@ -1488,26 +1574,38 @@ def main():
     history_path = out_dir / f"prediction_history_{target}_{ts}.csv"
     eval_path = out_dir / f"prediction_eval_{target}_{ts}.csv"
     route_eval_path = out_dir / f"prediction_eval_by_route_{target}_{ts}.csv"
+    route_winners_path = out_dir / f"prediction_route_winners_{target}_{ts}.csv"
     next_day_path = out_dir / f"prediction_next_day_{target}_{ts}.csv"
     trend_path = out_dir / f"prediction_trend_{target}_{ts}.csv"
     backtest_eval_path = out_dir / f"prediction_backtest_eval_{target}_{ts}.csv"
+    backtest_route_eval_path = out_dir / f"prediction_backtest_eval_by_route_{target}_{ts}.csv"
+    backtest_route_winners_path = out_dir / f"prediction_backtest_route_winners_{target}_{ts}.csv"
     backtest_splits_path = out_dir / f"prediction_backtest_splits_{target}_{ts}.csv"
     backtest_meta_path = out_dir / f"prediction_backtest_meta_{target}_{ts}.json"
 
+    route_winners_df = build_winner_table(
+        route_eval,
+        scope_cols=group_cols,
+        metric=args.backtest_selection_metric,
+        min_coverage_ratio=args.backtest_model_min_coverage_ratio,
+    )
     history_df.to_csv(history_path, index=False)
     overall_eval.to_csv(eval_path, index=False)
     route_eval.to_csv(route_eval_path, index=False)
+    route_winners_df.to_csv(route_winners_path, index=False)
     next_day_df.to_csv(next_day_path, index=False)
     trend_df.to_csv(trend_path, index=False)
 
     backtest_metric_rows = 0
+    backtest_route_metric_rows = 0
     backtest_split_rows = 0
     backtest_meta = {
         "status": "disabled",
         "reason": "--disable-backtest",
     }
+    backtest_route_winners_df = pd.DataFrame()
     if not args.disable_backtest:
-        backtest_eval_df, backtest_splits_df, backtest_meta = run_rolling_backtest(
+        backtest_eval_df, backtest_splits_df, backtest_route_eval_df, backtest_meta = run_rolling_backtest(
             history_df=history_df,
             target=target,
             pred_cols=pred_cols,
@@ -1520,8 +1618,18 @@ def main():
             model_min_coverage_ratio=args.backtest_model_min_coverage_ratio,
         )
         backtest_metric_rows = int(len(backtest_eval_df))
+        backtest_route_metric_rows = int(len(backtest_route_eval_df))
         backtest_split_rows = int(len(backtest_splits_df))
+        backtest_route_winners_df = build_winner_table(
+            backtest_route_eval_df,
+            scope_cols=group_cols,
+            metric=args.backtest_selection_metric,
+            min_coverage_ratio=args.backtest_model_min_coverage_ratio,
+            extra_group_cols=["dataset"],
+        )
         backtest_eval_df.to_csv(backtest_eval_path, index=False)
+        backtest_route_eval_df.to_csv(backtest_route_eval_path, index=False)
+        backtest_route_winners_df.to_csv(backtest_route_winners_path, index=False)
         backtest_splits_df.to_csv(backtest_splits_path, index=False)
         with backtest_meta_path.open("w", encoding="utf-8") as f:
             json.dump(
@@ -1537,6 +1645,7 @@ def main():
                         "cabin": args.cabin,
                     },
                     "prediction_models": pred_cols,
+                    "route_winner_rows": int(len(route_winners_df)),
                     "ml_requested_models": requested_ml_models,
                     "ml_active_models": active_ml_models,
                     "ml_skipped_models": ml_skipped,
@@ -1546,6 +1655,8 @@ def main():
                     "dl_skipped_models": dl_skipped,
                     "dl_quantiles": dl_quantiles,
                     "backtest": backtest_meta,
+                    "backtest_route_metric_rows": int(len(backtest_route_eval_df)),
+                    "backtest_route_winner_rows": int(len(backtest_route_winners_df)),
                     "backtest_selection_metric": args.backtest_selection_metric,
                     "backtest_model_min_coverage_ratio": args.backtest_model_min_coverage_ratio,
                 },
@@ -1556,6 +1667,7 @@ def main():
     print(f"history_rows={len(history_df)} -> {history_path}")
     print(f"overall_eval_rows={len(overall_eval)} -> {eval_path}")
     print(f"route_eval_rows={len(route_eval)} -> {route_eval_path}")
+    print(f"route_winner_rows={len(route_winners_df)} -> {route_winners_path}")
     print(f"next_day_rows={len(next_day_df)} -> {next_day_path}")
     print(f"trend_rows={len(trend_df)} -> {trend_path}")
     print(f"ml_requested_models={requested_ml_models}")
@@ -1570,6 +1682,8 @@ def main():
         print("backtest=disabled")
     else:
         print(f"backtest_eval_rows={backtest_metric_rows} -> {backtest_eval_path}")
+        print(f"backtest_route_eval_rows={backtest_route_metric_rows} -> {backtest_route_eval_path}")
+        print(f"backtest_route_winner_rows={len(backtest_route_winners_df)} -> {backtest_route_winners_path}")
         print(f"backtest_split_rows={backtest_split_rows} -> {backtest_splits_path}")
         print(f"backtest_meta -> {backtest_meta_path}")
     return 0

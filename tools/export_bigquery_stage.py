@@ -24,8 +24,11 @@ REPORTS_ROOT = REPO_ROOT / "output" / "reports"
 PREDICTION_EVAL_RE = re.compile(r"^prediction_eval_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
 PREDICTION_NEXT_RE = re.compile(r"^prediction_next_day_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
 PREDICTION_ROUTE_EVAL_RE = re.compile(r"^prediction_eval_by_route_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
+PREDICTION_ROUTE_WINNER_RE = re.compile(r"^prediction_route_winners_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
 PREDICTION_BACKTEST_META_RE = re.compile(r"^prediction_backtest_meta_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.json$")
 PREDICTION_BACKTEST_EVAL_RE = re.compile(r"^prediction_backtest_eval_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
+PREDICTION_BACKTEST_ROUTE_EVAL_RE = re.compile(r"^prediction_backtest_eval_by_route_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
+PREDICTION_BACKTEST_ROUTE_WINNER_RE = re.compile(r"^prediction_backtest_route_winners_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
 PREDICTION_BACKTEST_SPLITS_RE = re.compile(r"^prediction_backtest_splits_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
 
 
@@ -52,8 +55,10 @@ def _parse_tables(raw: str) -> list[str]:
             "fact_forecast_bundle",
             "fact_forecast_model_eval",
             "fact_forecast_route_eval",
+            "fact_forecast_route_winner",
             "fact_forecast_next_day",
             "fact_backtest_eval",
+            "fact_backtest_route_winner",
             "fact_backtest_split",
         ]
     return [part.strip() for part in raw.split(",") if part.strip()]
@@ -261,7 +266,10 @@ def _find_prediction_bundles(start_dt: datetime, end_dt: datetime) -> list[dict[
 
         file_name = path.name
         match = (
-            PREDICTION_ROUTE_EVAL_RE.match(file_name)
+            PREDICTION_ROUTE_WINNER_RE.match(file_name)
+            or PREDICTION_ROUTE_EVAL_RE.match(file_name)
+            or PREDICTION_BACKTEST_ROUTE_EVAL_RE.match(file_name)
+            or PREDICTION_BACKTEST_ROUTE_WINNER_RE.match(file_name)
             or PREDICTION_BACKTEST_META_RE.match(file_name)
             or PREDICTION_BACKTEST_EVAL_RE.match(file_name)
             or PREDICTION_BACKTEST_SPLITS_RE.match(file_name)
@@ -290,8 +298,11 @@ def _find_prediction_bundles(start_dt: datetime, end_dt: datetime) -> list[dict[
                 "bundle_created_at_utc": bundle_created_at_utc.isoformat(),
                 "eval_path": None,
                 "route_eval_path": None,
+                "route_winner_path": None,
                 "next_day_path": None,
                 "backtest_eval_path": None,
+                "backtest_route_eval_path": None,
+                "backtest_route_winner_path": None,
                 "backtest_splits_path": None,
                 "backtest_meta_path": None,
             },
@@ -304,10 +315,16 @@ def _find_prediction_bundles(start_dt: datetime, end_dt: datetime) -> list[dict[
 
         if file_name.startswith("prediction_eval_by_route_"):
             bundle["route_eval_path"] = str(path)
+        elif file_name.startswith("prediction_route_winners_"):
+            bundle["route_winner_path"] = str(path)
         elif file_name.startswith("prediction_eval_"):
             bundle["eval_path"] = str(path)
         elif file_name.startswith("prediction_next_day_"):
             bundle["next_day_path"] = str(path)
+        elif file_name.startswith("prediction_backtest_eval_by_route_"):
+            bundle["backtest_route_eval_path"] = str(path)
+        elif file_name.startswith("prediction_backtest_route_winners_"):
+            bundle["backtest_route_winner_path"] = str(path)
         elif file_name.startswith("prediction_backtest_eval_"):
             bundle["backtest_eval_path"] = str(path)
         elif file_name.startswith("prediction_backtest_splits_"):
@@ -366,8 +383,11 @@ def _export_fact_forecast_bundle(start_dt: datetime, end_dt: datetime) -> pd.Dat
                 "bundle_dir": bundle["bundle_dir"],
                 "has_overall_eval": bool(bundle.get("eval_path")),
                 "has_route_eval": bool(bundle.get("route_eval_path")),
+                "has_route_winner": bool(bundle.get("route_winner_path")),
                 "has_next_day": bool(bundle.get("next_day_path")),
                 "has_backtest_eval": bool(bundle.get("backtest_eval_path")),
+                "has_backtest_route_eval": bool(bundle.get("backtest_route_eval_path")),
+                "has_backtest_route_winner": bool(bundle.get("backtest_route_winner_path")),
                 "has_backtest_splits": bool(bundle.get("backtest_splits_path")),
                 "has_backtest_meta": bool(bundle.get("backtest_meta_path")),
                 "target_column": meta.get("target_column"),
@@ -404,6 +424,20 @@ def _export_fact_forecast_route_eval(start_dt: datetime, end_dt: datetime) -> pd
     return pd.DataFrame(rows)
 
 
+def _export_fact_forecast_route_winner(start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for bundle in _find_prediction_bundles(start_dt, end_dt):
+        df = _read_csv_if_exists(bundle.get("route_winner_path"))
+        if df.empty:
+            continue
+        df = df.where(pd.notnull(df), None)
+        if {"origin", "destination"}.issubset(df.columns):
+            df["route_key"] = df["origin"].astype(str) + "-" + df["destination"].astype(str)
+        for record in df.to_dict(orient="records"):
+            rows.append({**_bundle_base_record(bundle), **record})
+    return pd.DataFrame(rows)
+
+
 def _export_fact_forecast_next_day(start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for bundle in _find_prediction_bundles(start_dt, end_dt):
@@ -427,6 +461,20 @@ def _export_fact_backtest_eval(start_dt: datetime, end_dt: datetime) -> pd.DataF
         if df.empty:
             continue
         for record in df.where(pd.notnull(df), None).to_dict(orient="records"):
+            rows.append({**_bundle_base_record(bundle), **record})
+    return pd.DataFrame(rows)
+
+
+def _export_fact_backtest_route_winner(start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for bundle in _find_prediction_bundles(start_dt, end_dt):
+        df = _read_csv_if_exists(bundle.get("backtest_route_winner_path"))
+        if df.empty:
+            continue
+        df = df.where(pd.notnull(df), None)
+        if {"origin", "destination"}.issubset(df.columns):
+            df["route_key"] = df["origin"].astype(str) + "-" + df["destination"].astype(str)
+        for record in df.to_dict(orient="records"):
             rows.append({**_bundle_base_record(bundle), **record})
     return pd.DataFrame(rows)
 
@@ -493,8 +541,10 @@ FILE_EXPORTERS = {
     "fact_forecast_bundle": _export_fact_forecast_bundle,
     "fact_forecast_model_eval": _export_fact_forecast_model_eval,
     "fact_forecast_route_eval": _export_fact_forecast_route_eval,
+    "fact_forecast_route_winner": _export_fact_forecast_route_winner,
     "fact_forecast_next_day": _export_fact_forecast_next_day,
     "fact_backtest_eval": _export_fact_backtest_eval,
+    "fact_backtest_route_winner": _export_fact_backtest_route_winner,
     "fact_backtest_split": _export_fact_backtest_split,
 }
 
@@ -513,8 +563,11 @@ FORECAST_DATE_COLUMNS = {
 FORECAST_BOOL_COLUMNS = {
     "has_overall_eval",
     "has_route_eval",
+    "has_route_winner",
     "has_next_day",
     "has_backtest_eval",
+    "has_backtest_route_eval",
+    "has_backtest_route_winner",
     "has_backtest_splits",
     "has_backtest_meta",
     "selected_on_val",
@@ -530,8 +583,11 @@ FORECAST_EXPORT_COLUMNS: dict[str, list[str]] = {
         "bundle_created_at_utc",
         "has_overall_eval",
         "has_route_eval",
+        "has_route_winner",
         "has_next_day",
         "has_backtest_eval",
+        "has_backtest_route_eval",
+        "has_backtest_route_winner",
         "has_backtest_splits",
         "has_backtest_meta",
         "target_column",
@@ -579,6 +635,28 @@ FORECAST_EXPORT_COLUMNS: dict[str, list[str]] = {
         "f1_up",
         "f1_down",
         "f1_macro",
+    ],
+    "fact_forecast_route_winner": [
+        "bundle_id",
+        "bundle_name",
+        "target",
+        "stamp",
+        "bundle_created_at_utc",
+        "airline",
+        "origin",
+        "destination",
+        "route_key",
+        "cabin",
+        "winner_model",
+        "winner_metric",
+        "winner_n",
+        "winner_mae",
+        "winner_rmse",
+        "winner_directional_accuracy_pct",
+        "winner_f1_macro",
+        "max_candidate_n",
+        "coverage_threshold_n",
+        "candidate_models",
     ],
     "fact_forecast_next_day": [
         "bundle_id",
@@ -636,6 +714,29 @@ FORECAST_EXPORT_COLUMNS: dict[str, list[str]] = {
         "val_end",
         "test_start",
         "test_end",
+    ],
+    "fact_backtest_route_winner": [
+        "bundle_id",
+        "bundle_name",
+        "target",
+        "stamp",
+        "bundle_created_at_utc",
+        "dataset",
+        "airline",
+        "origin",
+        "destination",
+        "route_key",
+        "cabin",
+        "winner_model",
+        "winner_metric",
+        "winner_n",
+        "winner_mae",
+        "winner_rmse",
+        "winner_directional_accuracy_pct",
+        "winner_f1_macro",
+        "max_candidate_n",
+        "coverage_threshold_n",
+        "candidate_models",
     ],
     "fact_backtest_split": [
         "bundle_id",

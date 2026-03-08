@@ -144,6 +144,38 @@ JOIN `__PROJECT_ID__.__DATASET__.fact_forecast_bundle` b
 JOIN latest_bundle lb
   ON lb.bundle_id = r.bundle_id;
 
+CREATE OR REPLACE VIEW `__PROJECT_ID__.__DATASET__.vw_forecast_route_winner_latest` AS
+WITH latest_bundle AS (
+  SELECT bundle_id
+  FROM `__PROJECT_ID__.__DATASET__.fact_forecast_bundle`
+  QUALIFY ROW_NUMBER() OVER (ORDER BY bundle_created_at_utc DESC, stamp DESC, bundle_name DESC) = 1
+)
+SELECT
+  b.bundle_name,
+  b.target,
+  b.stamp,
+  b.bundle_created_at_utc,
+  r.airline,
+  r.origin,
+  r.destination,
+  r.route_key,
+  r.cabin,
+  r.winner_model,
+  r.winner_metric,
+  r.winner_n,
+  r.winner_mae,
+  r.winner_rmse,
+  r.winner_directional_accuracy_pct,
+  r.winner_f1_macro,
+  r.max_candidate_n,
+  r.coverage_threshold_n,
+  r.candidate_models
+FROM `__PROJECT_ID__.__DATASET__.fact_forecast_route_winner` r
+JOIN `__PROJECT_ID__.__DATASET__.fact_forecast_bundle` b
+  ON b.bundle_id = r.bundle_id
+JOIN latest_bundle lb
+  ON lb.bundle_id = r.bundle_id;
+
 CREATE OR REPLACE VIEW `__PROJECT_ID__.__DATASET__.vw_forecast_next_day_latest` AS
 WITH latest_bundle AS (
   SELECT bundle_id
@@ -220,3 +252,37 @@ JOIN `__PROJECT_ID__.__DATASET__.fact_forecast_bundle` b
   ON b.bundle_id = e.bundle_id
 JOIN latest_backtest lb
   ON lb.bundle_id = e.bundle_id;
+
+CREATE OR REPLACE VIEW `__PROJECT_ID__.__DATASET__.vw_backtest_route_winner_latest` AS
+WITH latest_backtest AS (
+  SELECT bundle_id
+  FROM `__PROJECT_ID__.__DATASET__.fact_forecast_bundle`
+  WHERE has_backtest_route_winner
+  QUALIFY ROW_NUMBER() OVER (ORDER BY bundle_created_at_utc DESC, stamp DESC, bundle_name DESC) = 1
+)
+SELECT
+  b.bundle_name,
+  b.target,
+  b.stamp,
+  b.bundle_created_at_utc,
+  r.dataset,
+  r.airline,
+  r.origin,
+  r.destination,
+  r.route_key,
+  r.cabin,
+  r.winner_model,
+  r.winner_metric,
+  r.winner_n,
+  r.winner_mae,
+  r.winner_rmse,
+  r.winner_directional_accuracy_pct,
+  r.winner_f1_macro,
+  r.max_candidate_n,
+  r.coverage_threshold_n,
+  r.candidate_models
+FROM `__PROJECT_ID__.__DATASET__.fact_backtest_route_winner` r
+JOIN `__PROJECT_ID__.__DATASET__.fact_forecast_bundle` b
+  ON b.bundle_id = r.bundle_id
+JOIN latest_backtest lb
+  ON lb.bundle_id = r.bundle_id;
