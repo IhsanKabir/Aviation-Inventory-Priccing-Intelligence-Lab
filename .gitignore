@@ -10,6 +10,9 @@ venv/
 
 .env
 .env.*
+!.env.example
+!apps/**/.env.example
+!apps/**/.env.production.example
 
 cookies/*.json
 !cookies/README.md

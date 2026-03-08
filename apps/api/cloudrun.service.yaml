@@ -1,0 +1,35 @@
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  name: aero-pulse-api
+spec:
+  template:
+    metadata:
+      annotations:
+        run.googleapis.com/execution-environment: gen2
+        autoscaling.knative.dev/minScale: "0"
+        autoscaling.knative.dev/maxScale: "10"
+    spec:
+      serviceAccountName: aero-pulse-api@aeropulseintelligence.iam.gserviceaccount.com
+      containers:
+        - image: REGION-docker.pkg.dev/PROJECT_ID/aero-pulse/api:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: API_CORS_ORIGINS
+              value: https://YOUR_VERCEL_DOMAIN.vercel.app
+            - name: API_FORECASTING_SOURCE
+              value: bigquery
+            - name: BIGQUERY_PROJECT_ID
+              value: aeropulseintelligence
+            - name: BIGQUERY_DATASET
+              value: aviation_intel
+            - name: AIRLINE_DB_URL
+              valueFrom:
+                secretKeyRef:
+                  name: airline-db-url
+                  key: latest
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi

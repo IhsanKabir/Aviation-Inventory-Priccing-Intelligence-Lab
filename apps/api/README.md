@@ -41,3 +41,14 @@ The current Excel workbook is useful as an export, but it is too heavy to remain
 - a faster Next.js operational monitor
 - downstream analytics handoff
 - reusable query contracts for BigQuery export
+
+## Deployment
+
+Production target:
+
+- host on Google Cloud Run
+- use [Dockerfile](Dockerfile)
+- use [cloudrun.service.yaml](cloudrun.service.yaml) as the deployment template
+- set env vars from [.env.example](.env.example)
+
+For BigQuery in Cloud Run, use the attached service account. Do not mount a downloaded JSON key in production.

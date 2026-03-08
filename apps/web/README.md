@@ -66,3 +66,13 @@ Recommended split later:
 
 - BigQuery + Looker Studio:
   analytics and dashboards
+
+## Deployment
+
+For production:
+
+- set Vercel Root Directory to `apps/web`
+- use [vercel.json](vercel.json)
+- set env vars from [.env.production.example](.env.production.example)
+
+The frontend should point to the hosted API, not localhost.
