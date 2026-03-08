@@ -38,15 +38,14 @@ jobs:
       - name: Configure Docker auth
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
-      - name: Build and push API image
+      - name: Build API image
         run: |
           IMAGE_URI="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${ARTIFACT_REPOSITORY}/api:${GITHUB_SHA}"
-          gcloud builds submit \
-            --project "${GCP_PROJECT_ID}" \
-            --tag "${IMAGE_URI}" \
-            --file apps/api/Dockerfile \
-            .
+          docker build -f apps/api/Dockerfile -t "${IMAGE_URI}" .
           echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+
+      - name: Push API image
+        run: docker push "${IMAGE_URI}"
 
       - name: Deploy Cloud Run service
         run: |
