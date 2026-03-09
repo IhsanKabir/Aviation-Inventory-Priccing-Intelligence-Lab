@@ -26,10 +26,13 @@ Run locally from the repository root:
 - `GET /api/v1/reporting/cycles/latest`
 - `GET /api/v1/reporting/cycles/recent`
 - `GET /api/v1/reporting/current-snapshot`
+- `GET /api/v1/reporting/airline-operations`
 - `GET /api/v1/reporting/route-summary`
 - `GET /api/v1/reporting/change-events`
+- `GET /api/v1/reporting/change-dashboard`
 - `GET /api/v1/reporting/penalties`
 - `GET /api/v1/reporting/taxes`
+- `GET /api/v1/reporting/export.xlsx`
 
 ## Hosted Mode
 
@@ -43,11 +46,35 @@ designed to work without `AIRLINE_DB_URL` when BigQuery is configured:
 - `GET /api/v1/reporting/cycles/latest`
 - `GET /api/v1/reporting/cycles/recent`
 - `GET /api/v1/reporting/route-monitor-matrix`
+- `GET /api/v1/reporting/airline-operations`
 - `GET /api/v1/reporting/change-events`
+- `GET /api/v1/reporting/change-dashboard`
 - `GET /api/v1/reporting/penalties`
 - `GET /api/v1/reporting/taxes`
+- `GET /api/v1/reporting/export.xlsx`
 
 `current-snapshot` and `route-summary` remain transitional PostgreSQL-oriented endpoints.
+
+## Excel Export
+
+`GET /api/v1/reporting/export.xlsx` returns a filter-scoped workbook that can include:
+
+- `routes`
+- `changes`
+- `taxes`
+- `penalties`
+
+The endpoint accepts the same core query parameters already used by the reporting pages, including `cycle_id`, `airline`, `origin`, `destination`, `cabin`, `start_date`, `end_date`, `domain`, `change_type`, `direction`, `route_limit`, `history_limit`, and `limit`.
+
+Route-bearing payloads now include country-aware route metadata derived from `config/airport_countries.json`, including `route_type` (`DOM`, `INT`, `UNK`), `origin_country_code`, `destination_country_code`, `country_pair`, `domestic_country_code`, and `is_cross_border`.
+
+`GET /api/v1/reporting/airline-operations` is the route-operations surface for the web page. It returns route-level operating summaries, weekday profiles, airline departure-time bands, and recent-cycle trend points using the same filter contract as the rest of the reporting API plus `route_type` and `trend_limit`.
+
+`GET /api/v1/reporting/taxes` now acts as a tax-monitor payload, not only a detail-row feed. It still returns `rows`, but now also includes route-level spread summaries, airline-level movement summaries, and recent-cycle tax trend metadata for the same filtered scope.
+
+`GET /api/v1/reporting/change-dashboard` is the market-movement summary surface for the Changes page. It returns scope-level counts, daily change volume, top routes, top airlines, domain mix, field mix, and largest-move events for the same filter contract as `change-events`.
+
+`GET /api/v1/reporting/route-monitor-matrix` now accepts optional `trip_type` and `return_date` filters for PostgreSQL-backed round-trip review. When round-trip metadata is present, route payloads include trip pairing fields and flight-group leg metadata so the web can group outbound and inbound sections together.
 
 ## Naming Note
 

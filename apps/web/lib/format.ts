@@ -149,3 +149,37 @@ export function normalizeLongText(value?: string | null) {
 
   return normalized || "-";
 }
+
+export function formatRouteType(routeType?: string | null) {
+  if (routeType === "DOM" || routeType === "INT") {
+    return routeType;
+  }
+  return "UNK";
+}
+
+export function formatRouteGeo(originCountryCode?: string | null, destinationCountryCode?: string | null) {
+  if (originCountryCode && destinationCountryCode) {
+    return `${originCountryCode} -> ${destinationCountryCode}`;
+  }
+  if (originCountryCode) {
+    return `${originCountryCode} -> ?`;
+  }
+  if (destinationCountryCode) {
+    return `? -> ${destinationCountryCode}`;
+  }
+  return "Country map pending";
+}
+
+export function formatRouteTypeDetail(
+  routeType?: string | null,
+  originCountryCode?: string | null,
+  destinationCountryCode?: string | null
+) {
+  if (routeType === "DOM" && originCountryCode) {
+    return `Domestic within ${originCountryCode}`;
+  }
+  if (routeType === "INT") {
+    return formatRouteGeo(originCountryCode, destinationCountryCode);
+  }
+  return `Unknown scope · ${formatRouteGeo(originCountryCode, destinationCountryCode)}`;
+}

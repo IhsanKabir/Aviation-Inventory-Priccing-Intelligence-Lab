@@ -1,6 +1,6 @@
 ﻿# Airline Intelligence System Decisions (Thesis Track)
 
-Last updated: 2026-03-07
+Last updated: 2026-03-09
 
 ## 1) Program Vision
 
@@ -74,11 +74,19 @@ Mandatory for analysis (minimum set):
 ### Search Scope
 
 - All possible search combinations over time (routes/cabins/passenger mixes/date windows)
+- Round-trip search is supported as search intent layered on top of one-way fact storage
 
 ### Cabin & Fare Mapping
 
 - Cabin-specific monitoring is required
 - Track which fare basis belongs to which cabin over time
+
+### Round-Trip Architecture
+
+- Keep `flight_offers` as the one-way canonical fact table
+- Store round-trip request and leg-link metadata in raw meta first
+- Expose outbound/inbound pairing through `trip_request_id` plus leg direction/sequence
+- Upgrade connectors incrementally instead of forcing an all-at-once migration
 
 ### Reporting
 
@@ -708,3 +716,48 @@ Implementation status (2026-02-23):
   - PostgreSQL reporting API
   - BigQuery export pipeline
 - Keep it only as a future signal/intelligence hook unless a downstream consumer is added.
+
+## 15) Web Product Scope Decision (2026-03-09)
+
+Decision:
+
+- The active hosted product scope is now tracked in [docs/WEB_PRODUCT_REQUIREMENTS.md](docs/WEB_PRODUCT_REQUIREMENTS.md).
+- That document is the implementation-facing source of truth for:
+  - bug-fix scope
+  - UI/UX improvements
+  - new web features
+  - future roadmap expectations
+
+Confirmed prioritization groups:
+
+- Bug fixes
+  - active-navigation state must be correct
+
+- UI/UX improvements
+  - departure-time-first ordering across airlines
+  - scan-friendly Changes page
+  - shared date-selection model
+  - conditional visibility for inventory-estimation columns
+
+- New features
+  - filter-driven Excel export
+  - route categorization as `DOM` / `INT`
+  - round-trip support
+  - Airline Operations page
+  - tax monitor upgrade
+  - market-level Changes dashboard
+
+- Future roadmap
+  - future penalty-model integration
+  - forecasting expansion as the main advanced intelligence track
+
+Architectural guidance:
+
+1. Keep Excel as an export artifact, not the primary interactive surface.
+2. Keep local PostgreSQL as the collection and training store.
+3. Keep hosted reads BigQuery-first through FastAPI.
+4. Treat filtering, date semantics, and route identity as shared contracts across pages, exports, and future forecasting surfaces.
+
+Execution note:
+
+- Implementation should follow the priority order defined in [docs/WEB_PRODUCT_REQUIREMENTS.md](docs/WEB_PRODUCT_REQUIREMENTS.md), starting with navigation correctness, comparison ordering, and scan-first market review UX.

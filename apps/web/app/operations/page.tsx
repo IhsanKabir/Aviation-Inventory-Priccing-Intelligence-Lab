@@ -1,0 +1,304 @@
+import { LiveFilterControls } from "@/components/live-filter-controls";
+import { DataPanel } from "@/components/data-panel";
+import { MetricCard } from "@/components/metric-card";
+import {
+  getAirlineOperationsPayload,
+  getAirlines,
+  getRecentCycles,
+  getRoutes,
+  type OperationsRoute,
+} from "@/lib/api";
+import { buildReportingExportUrl } from "@/lib/export";
+import {
+  formatDhakaDateTime,
+  formatRouteGeo,
+  formatRouteType,
+  formatRouteTypeDetail,
+  shortCycle,
+} from "@/lib/format";
+import { firstParam, manyParams, parseLimit, type RawSearchParams } from "@/lib/query";
+
+type PageProps = {
+  searchParams?: Promise<RawSearchParams>;
+};
+
+function selectedRouteKey(origin?: string, destination?: string) {
+  if (!origin || !destination) {
+    return undefined;
+  }
+  return `${origin}-${destination}`;
+}
+
+function summarizeNetworkWindow(routes: OperationsRoute[]) {
+  const times = routes.flatMap((route) => [route.first_departure_time, route.last_departure_time]).filter(Boolean) as string[];
+  if (!times.length) {
+    return "-";
+  }
+  const sorted = times.slice().sort();
+  return `${sorted[0]} to ${sorted[sorted.length - 1]}`;
+}
+
+export default async function OperationsPage({ searchParams }: PageProps) {
+  const params = (await searchParams) ?? {};
+  const selectedAirlines = manyParams(params, "airline");
+  const selectedRouteTypes = manyParams(params, "route_type");
+  const origin = firstParam(params, "origin");
+  const destination = firstParam(params, "destination");
+  const cycleId = firstParam(params, "cycle_id") ?? undefined;
+  const startDate = firstParam(params, "start_date") ?? undefined;
+  const endDate = firstParam(params, "end_date") ?? undefined;
+  const routeLimit = parseLimit(firstParam(params, "route_limit"), 3);
+  const trendLimit = parseLimit(firstParam(params, "trend_limit"), 8);
+  const routeKey = selectedRouteKey(origin, destination);
+
+  const [airlines, routes, recentCycles, operations] = await Promise.all([
+    getAirlines(),
+    getRoutes(),
+    getRecentCycles(8),
+    getAirlineOperationsPayload({
+      cycleId,
+      airlines: selectedAirlines,
+      origins: origin ? [origin] : undefined,
+      destinations: destination ? [destination] : undefined,
+      routeTypes: selectedRouteTypes,
+      startDate,
+      endDate,
+      routeLimit,
+      trendLimit,
+    }),
+  ]);
+
+  const routeBlocks = operations.data?.routes ?? [];
+  const airlineOptions = [...(airlines.data?.items ?? [])]
+    .sort((left, right) => (right.offer_rows ?? 0) - (left.offer_rows ?? 0) || left.airline.localeCompare(right.airline))
+    .slice(0, 20)
+    .map((item) => item.airline);
+  const routeOptions = [...(routes.data?.items ?? [])]
+    .sort((left, right) => (right.offer_rows ?? 0) - (left.offer_rows ?? 0) || left.route_key.localeCompare(right.route_key))
+    .slice(0, 16)
+    .map((item) => ({ routeKey: item.route_key, origin: item.origin, destination: item.destination }));
+  const cycleOptions = (recentCycles.data?.items ?? [])
+    .filter((item) => item.cycle_id)
+    .map((item) => ({
+      label: `${shortCycle(item.cycle_id)}${item.cycle_completed_at_utc ? ` | ${formatDhakaDateTime(item.cycle_completed_at_utc)}` : ""}`,
+      value: item.cycle_id as string,
+    }));
+  const exportHref = buildReportingExportUrl(params, ["operations"]);
+
+  const routeCount = routeBlocks.length;
+  const airlineCount = new Set(routeBlocks.flatMap((route) => route.airlines.map((item) => item.airline))).size;
+  const flightInstanceCount = routeBlocks.reduce((sum, route) => sum + route.flight_instance_count, 0);
+  const activeDateCount = routeBlocks.reduce((sum, route) => sum + route.active_date_count, 0);
+
+  return (
+    <>
+      <h1 className="page-title">Airline Operations</h1>
+      <p className="page-copy">
+        Route-level operating pattern review across airlines. This page focuses on who is flying, how often they
+        are flying, when they depart, and whether the operation footprint is expanding or narrowing across recent cycles.
+      </p>
+
+      <div className="grid cards">
+        <MetricCard
+          label="Cycle"
+          value={shortCycle(operations.data?.cycle_id ?? cycleId ?? null)}
+          footnote={operations.ok ? "Latest warehouse-backed operations slice" : "No cycle loaded"}
+        />
+        <MetricCard label="Routes" value={routeCount.toLocaleString()} footnote={`Route block limit ${routeLimit.toLocaleString()}`} />
+        <MetricCard label="Airlines" value={airlineCount.toLocaleString()} footnote={`${flightInstanceCount.toLocaleString()} visible departures`} />
+        <MetricCard label="Network window" value={summarizeNetworkWindow(routeBlocks)} footnote={`${activeDateCount.toLocaleString()} departure dates in scope`} />
+      </div>
+
+      <div className="stack">
+        <DataPanel
+          title="Operations filters"
+          copy="Use the same shared route and airline controls here, then narrow by cycle, route type, or departure-date window."
+        >
+          <LiveFilterControls
+            airlineOptions={airlineOptions}
+            clearKeys={["airline", "origin", "destination", "route_type", "cycle_id", "start_date", "end_date", "route_limit", "trend_limit"]}
+            extraGroups={[
+              ...(cycleOptions.length
+                ? [
+                    {
+                      key: "cycle_id",
+                      label: "Recent cycles",
+                      selected: cycleId ? [cycleId] : [],
+                      options: cycleOptions,
+                      multi: false,
+                    },
+                  ]
+                : []),
+              {
+                key: "route_type",
+                label: "Route type",
+                selected: selectedRouteTypes,
+                options: [
+                  { label: "Domestic", value: "DOM" },
+                  { label: "International", value: "INT" },
+                  { label: "Unknown", value: "UNK" },
+                ],
+              },
+            ]}
+            initialValues={{
+              origin: origin ?? "",
+              destination: destination ?? "",
+              start_date: startDate ?? "",
+              end_date: endDate ?? "",
+              route_limit: String(routeLimit),
+              trend_limit: String(trendLimit),
+            }}
+            manualFields={[
+              { name: "origin", label: "Origin", placeholder: "DAC" },
+              { name: "destination", label: "Destination", placeholder: "DXB" },
+              { name: "start_date", label: "Start date", type: "date" },
+              { name: "end_date", label: "End date", type: "date" },
+              { name: "route_limit", label: "Route blocks", inputMode: "numeric", pattern: "[0-9]*" },
+              { name: "trend_limit", label: "Trend cycles", inputMode: "numeric", pattern: "[0-9]*" },
+            ]}
+            routeOptions={routeOptions}
+            selectedAirlines={selectedAirlines}
+            selectedRouteKey={routeKey}
+          />
+
+          <div className="button-row">
+            <a className="button-link ghost" href={exportHref}>
+              Download Excel
+            </a>
+          </div>
+        </DataPanel>
+
+        {!operations.ok ? (
+          <DataPanel
+            title="Operations blocks"
+            copy="The API request for operations data did not complete."
+          >
+            <div className="empty-state error-state">API error: {operations.error ?? "Unable to load airline operations."}</div>
+          </DataPanel>
+        ) : routeBlocks.length === 0 ? (
+          <DataPanel
+            title="Operations blocks"
+            copy="No operational patterns matched the current scope."
+          >
+            <div className="empty-state">No routes matched the current operations filter set.</div>
+          </DataPanel>
+        ) : (
+          routeBlocks.map((route) => (
+            <DataPanel
+              key={route.route_key}
+              title={`${route.route_key} operations`}
+              copy={formatRouteTypeDetail(route.route_type, route.origin_country_code, route.destination_country_code)}
+            >
+              <div className="operations-summary-grid">
+                <div className="card operations-stat">
+                  <span>Route type</span>
+                  <strong>{formatRouteType(route.route_type)}</strong>
+                  <small>{formatRouteGeo(route.origin_country_code, route.destination_country_code)}</small>
+                </div>
+                <div className="card operations-stat">
+                  <span>Active airlines</span>
+                  <strong>{route.airline_count.toLocaleString()}</strong>
+                  <small>{route.flight_instance_count.toLocaleString()} visible departures</small>
+                </div>
+                <div className="card operations-stat">
+                  <span>Departure dates</span>
+                  <strong>{route.active_date_count.toLocaleString()}</strong>
+                  <small>{route.departure_times.length.toLocaleString()} departure-time bands</small>
+                </div>
+                <div className="card operations-stat">
+                  <span>Operating window</span>
+                  <strong>{route.first_departure_time ?? "-"}</strong>
+                  <small>{route.last_departure_time ?? "-"}</small>
+                </div>
+              </div>
+
+              <div className="section-grid operations-grid">
+                <div className="table-list">
+                  <div className="filter-label">Airline schedule map</div>
+                  {route.airlines.map((airline) => (
+                    <div className="table-row" key={`${route.route_key}-${airline.airline}`}>
+                      <div>
+                        <strong>{airline.airline}</strong>
+                        <span>
+                          {airline.departure_times.join(", ") || "-"} | Flights: {airline.flight_numbers.join(", ") || "-"}
+                        </span>
+                      </div>
+                      <div className="pill good">{airline.flight_instance_count.toLocaleString()} deps</div>
+                      <span>{airline.active_date_count.toLocaleString()} days</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="operations-weekday-grid">
+                  {route.weekday_profile.map((day) => (
+                    <div className="card operations-weekday-card" key={`${route.route_key}-${day.day_label}`}>
+                      <span>{day.day_label.slice(0, 3)}</span>
+                      <strong>{day.flight_instance_count.toLocaleString()}</strong>
+                      <small>{day.airline_count?.toLocaleString() ?? "0"} airlines</small>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="stack">
+                <div className="data-table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Departure date</th>
+                        <th>Day</th>
+                        <th>Airlines</th>
+                        <th>Departures</th>
+                        <th>First departure</th>
+                        <th>Last departure</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {route.departure_days.map((day) => (
+                        <tr key={`${route.route_key}-${day.departure_date}`}>
+                          <td>{day.departure_date}</td>
+                          <td>{day.day_label}</td>
+                          <td>{day.airline_count.toLocaleString()}</td>
+                          <td>{day.flight_instance_count.toLocaleString()}</td>
+                          <td>{day.first_departure_time ?? "-"}</td>
+                          <td>{day.last_departure_time ?? "-"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="data-table-wrap">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th>Cycle</th>
+                        <th>Completed</th>
+                        <th>Airlines</th>
+                        <th>Departures</th>
+                        <th>Active dates</th>
+                        <th>Window</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {route.timeline.map((point) => (
+                        <tr key={`${route.route_key}-${point.cycle_id}`}>
+                          <td>{shortCycle(point.cycle_id)}</td>
+                          <td>{formatDhakaDateTime(point.cycle_completed_at_utc)}</td>
+                          <td>{point.airline_count?.toLocaleString() ?? "-"}</td>
+                          <td>{point.flight_instance_count.toLocaleString()}</td>
+                          <td>{point.active_date_count.toLocaleString()}</td>
+                          <td>{`${point.first_departure_time ?? "-"} to ${point.last_departure_time ?? "-"}`}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </DataPanel>
+          ))
+        )}
+      </div>
+    </>
+  );
+}

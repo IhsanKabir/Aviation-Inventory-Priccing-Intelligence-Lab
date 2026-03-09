@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
-import { headers } from "next/headers";
 
 import "./globals.css";
 
@@ -27,13 +26,10 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const headerStore = await headers();
-  const pathname = headerStore.get("x-pathname") || "/";
-
   return (
     <html lang="en" className={`${display.variable} ${mono.variable}`}>
       <body style={{ fontFamily: "var(--font-display)" }}>
-        <Topbar pathname={pathname} />
+        <Topbar />
         <main className="page shell">{children}</main>
       </body>
     </html>

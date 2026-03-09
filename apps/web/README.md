@@ -2,6 +2,8 @@
 
 This directory contains the Next.js web application for the hosted operational monitor.
 
+Active scope, UX requirements, and delivery priorities are tracked in [../../docs/WEB_PRODUCT_REQUIREMENTS.md](../../docs/WEB_PRODUCT_REQUIREMENTS.md).
+
 ## Stack
 
 - Next.js
@@ -38,19 +40,49 @@ See:
   Executive overview with cycle health, platform status, airline coverage, and route coverage cards.
 
 - `/routes`
-  Live route monitor with API-backed filters for route, airline, and cabin scope.
+  Live route monitor with API-backed filters for route, airline, cabin, and trip scope, plus filter-scoped Excel export.
+
+- `/operations`
+  Airline operations page for route-level airline activity, weekday rhythm, and recent-cycle operational change review.
 
 - `/penalties`
-  Penalty comparison screen against the reporting API.
+  Penalty comparison screen against the reporting API with filter-scoped Excel export.
 
 - `/taxes`
-  Tax comparison screen against the reporting API.
+  Tax monitor screen with route spread, airline movement summaries, and filter-scoped Excel export.
 
 - `/changes`
-  Change-event browser for hosted review of route and airline movements.
+  Market-movement dashboard plus row-level event browser, with filter-scoped Excel export.
 
 - `/forecasting`
   Warehouse-backed ML/DL forecast and backtest review surface.
+
+## Planned Page Evolution
+
+- `/routes`
+  Now supports first-pass round-trip grouping by pairing outbound and inbound route blocks under a shared round-trip shell when trip metadata is present.
+
+- `/operations`
+  Planned route-level airline operations page for daily and weekly pattern review.
+
+- `/taxes`
+  Will evolve from a flat current-cycle table into a comparative tax-monitor surface with change visibility.
+
+- `/changes`
+  Now combines a market-movement dashboard, daily volume strip, largest-move callouts, and the row-level drilldown table.
+
+- `/forecasting`
+  Remains the main forward-looking intelligence page and must always pair predictions with quality and freshness context.
+
+## UX Guardrails
+
+- Navigation highlight must always match the active route.
+- Cross-airline comparison views default to departure-time ordering.
+- Date-selection behavior should be shared across pages instead of implemented differently per screen.
+- Route-bearing views should expose country-aware `DOM` / `INT` context from the API instead of duplicating route classification in the client.
+- Operations views should stay route-first: who flies, when they fly, how often they fly, and how that footprint changes across recent cycles.
+- Dense analytical pages should prefer sticky filters, pinned identity columns, and scan-first summaries.
+- Excel is a downloadable artifact, not the primary interaction model.
 
 ## Why Vercel May Help
 

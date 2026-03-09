@@ -2,11 +2,13 @@ import { DataPanel } from "@/components/data-panel";
 import { MetricCard } from "@/components/metric-card";
 import { RouteMonitorMatrix } from "@/components/route-monitor-matrix";
 import {
+  getRecentCycles,
   getRouteMonitorMatrixPayload,
   getRoutes
 } from "@/lib/api";
-import { shortCycle } from "@/lib/format";
-import { firstParam, manyParams, parseLimit, type RawSearchParams } from "@/lib/query";
+import { buildReportingExportUrl } from "@/lib/export";
+import { formatDhakaDateTime, shortCycle } from "@/lib/format";
+import { buildHref, firstParam, manyParams, parseLimit, setParam, type RawSearchParams } from "@/lib/query";
 
 type PageProps = {
   searchParams?: Promise<RawSearchParams>;
@@ -18,23 +20,29 @@ export default async function RoutesPage({ searchParams }: PageProps) {
   const origin = firstParam(params, "origin");
   const destination = firstParam(params, "destination");
   const cabin = firstParam(params, "cabin");
+  const tripType = firstParam(params, "trip_type") ?? "OW";
+  const returnDate = firstParam(params, "return_date");
   const cycleId = firstParam(params, "cycle_id") ?? undefined;
   const routeLimit = parseLimit(firstParam(params, "route_limit"), 5);
   const historyLimit = parseLimit(firstParam(params, "history_limit"), 6);
 
-  const [routes, matrix] = await Promise.all([
+  const [routes, recentCycles, matrix] = await Promise.all([
     getRoutes(),
+    getRecentCycles(8),
     getRouteMonitorMatrixPayload({
       cycleId,
       origins: origin ? [origin] : undefined,
       destinations: destination ? [destination] : undefined,
       cabins: cabin ? [cabin] : undefined,
+      tripTypes: tripType ? [tripType] : undefined,
+      returnDate: returnDate ?? undefined,
       routeLimit,
       historyLimit
     })
   ]);
 
   const routeBlocks = matrix.data?.routes ?? [];
+  const recentCycleOptions = recentCycles.data?.items ?? [];
   const routeOptions = [...(routes.data?.items ?? [])]
     .sort((left, right) => (right.offer_rows ?? 0) - (left.offer_rows ?? 0) || left.route_key.localeCompare(right.route_key))
     .slice(0, 16)
@@ -45,6 +53,7 @@ export default async function RoutesPage({ searchParams }: PageProps) {
   ).size;
   const flightGroupCount = routeBlocks.reduce((sum, route) => sum + route.flight_groups.length, 0);
   const datedRowCount = routeBlocks.reduce((sum, route) => sum + route.date_groups.length, 0);
+  const exportHref = buildReportingExportUrl(params, ["routes"]);
 
   return (
     <>
@@ -65,7 +74,7 @@ export default async function RoutesPage({ searchParams }: PageProps) {
         <MetricCard
           label="Flight groups"
           value={flightGroupCount.toLocaleString()}
-          footnote={`${availableAirlineCount.toLocaleString()} airlines in scope`}
+          footnote={`${availableAirlineCount.toLocaleString()} airlines in scope${tripType === "RT" ? " · round-trip" : ""}`}
         />
         <MetricCard
           label="Departure rows"
@@ -79,7 +88,26 @@ export default async function RoutesPage({ searchParams }: PageProps) {
           title="Matrix scope"
           copy="Use route scope controls to load a tighter matrix from the API. Inside the matrix itself, airline and signal toggles behave like the workbook."
         >
+          {recentCycleOptions.length ? (
+            <div className="filter-group">
+              <div className="filter-label">Recent cycles</div>
+              <div className="chip-row">
+                {recentCycleOptions.map((item) => (
+                  <a
+                    className="chip"
+                    data-active={cycleId === item.cycle_id}
+                    href={buildHref(setParam(params, "cycle_id", item.cycle_id ?? undefined))}
+                    key={item.cycle_id ?? "latest-cycle"}
+                  >
+                    {shortCycle(item.cycle_id)}
+                    {item.cycle_completed_at_utc ? ` · ${formatDhakaDateTime(item.cycle_completed_at_utc)}` : ""}
+                  </a>
+                ))}
+              </div>
+            </div>
+          ) : null}
           <form className="filter-form" action="/routes">
+            {cycleId ? <input name="cycle_id" type="hidden" value={cycleId} /> : null}
             <div className="field-grid route-scope-grid">
               <label className="field">
                 <span>Origin</span>
@@ -94,6 +122,17 @@ export default async function RoutesPage({ searchParams }: PageProps) {
                 <input defaultValue={cabin ?? ""} name="cabin" placeholder="Economy" type="text" />
               </label>
               <label className="field">
+                <span>Trip type</span>
+                <select defaultValue={tripType} name="trip_type">
+                  <option value="OW">One-way</option>
+                  <option value="RT">Round-trip</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>Return date</span>
+                <input defaultValue={returnDate ?? ""} name="return_date" type="date" />
+              </label>
+              <label className="field">
                 <span>Route blocks</span>
                 <input defaultValue={String(routeLimit)} inputMode="numeric" name="route_limit" pattern="[0-9]*" type="text" />
               </label>
@@ -106,6 +145,9 @@ export default async function RoutesPage({ searchParams }: PageProps) {
               <button className="button-link" type="submit">
                 Reload matrix
               </button>
+              <a className="button-link ghost" href={exportHref}>
+                Download Excel
+              </a>
               <a className="button-link ghost" href="/routes">
                 Reset scope
               </a>
@@ -115,7 +157,7 @@ export default async function RoutesPage({ searchParams }: PageProps) {
                 {routeOptions.map((item) => (
                   <a
                     className="route-hint-chip"
-                    href={`/routes?origin=${encodeURIComponent(item.origin)}&destination=${encodeURIComponent(item.destination)}&route_limit=${routeLimit}&history_limit=${historyLimit}${cabin ? `&cabin=${encodeURIComponent(cabin)}` : ""}`}
+                    href={`/routes?origin=${encodeURIComponent(item.origin)}&destination=${encodeURIComponent(item.destination)}&route_limit=${routeLimit}&history_limit=${historyLimit}${cabin ? `&cabin=${encodeURIComponent(cabin)}` : ""}${tripType ? `&trip_type=${encodeURIComponent(tripType)}` : ""}${returnDate ? `&return_date=${encodeURIComponent(returnDate)}` : ""}${cycleId ? `&cycle_id=${encodeURIComponent(cycleId)}` : ""}`}
                     key={item.routeKey}
                   >
                     {item.routeKey}

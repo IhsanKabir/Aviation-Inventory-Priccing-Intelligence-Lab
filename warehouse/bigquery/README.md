@@ -34,6 +34,20 @@ This is the strongest free-to-start combination for:
 - `fact_backtest_route_winner`
 - `fact_backtest_split`
 
+`fact_offer_snapshot` now includes round-trip route-monitor fields:
+
+- `search_trip_type`
+- `trip_request_id`
+- `requested_outbound_date`
+- `requested_return_date`
+- `trip_duration_days`
+- `trip_origin`
+- `trip_destination`
+- `trip_pair_key`
+- `leg_direction`
+- `leg_sequence`
+- `itinerary_leg_count`
+
 ## Export Contract
 
 Source of truth for export layout:
@@ -71,3 +85,7 @@ Source of truth for export layout:
 ```powershell
 .\.venv\Scripts\python.exe tools\export_bigquery_stage.py --output-dir output\warehouse\bigquery --start-date 2026-03-01 --end-date 2026-03-07 --load-bigquery --project-id your-gcp-project --dataset aviation_intel
 ```
+
+## Schema Note
+
+If `fact_offer_snapshot` already exists in BigQuery, add the new round-trip columns before the next append load or rerun the bootstrap SQL against a fresh table set. The canonical schema is in [sql/bigquery/create_aviation_intel_tables.sql](../../sql/bigquery/create_aviation_intel_tables.sql).

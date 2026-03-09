@@ -4,6 +4,8 @@
 
 Move the main interactive experience away from Excel and into a responsive web application without breaking the existing report pipeline.
 
+Active product requirements and delivery priorities are tracked in [docs/WEB_PRODUCT_REQUIREMENTS.md](WEB_PRODUCT_REQUIREMENTS.md).
+
 ## Chosen Architecture
 
 - Local collection/training backend:
@@ -53,18 +55,53 @@ The web app should support:
 - penalty/tax tabs
 - prediction tabs
 - export links back to workbook outputs
+- consistent date and cycle selection across pages
+- operations-oriented route views, not only raw row tables
+- scan-first market movement review for changes and taxes
+
+## Current Delivery Priorities
+
+Priority order for the next implementation cycle:
+
+1. Fix active navigation highlighting.
+2. Sort route comparison rows by departure time across airlines.
+3. Redesign the Changes page for scanning, filtering, and drilldown.
+4. Introduce shared date-selection controls.
+5. Add generic Excel export based on current filters.
+6. Add `DOM` / `INT` route categorization.
+7. Hide inventory-estimation columns unless relevant data exists.
+8. Upgrade Tax into a comparative monitoring page.
+9. Add a market-level Changes dashboard.
+10. Add the Airline Operations page.
+11. Land round-trip architecture in collection/runtime first, then expose it through API and UI.
+12. Expand forecasting and preserve penalty-model integration flexibility.
+
+## Recommended UX Direction
+
+- Keep the top-level pages shallow and operational:
+  - overview for status
+  - routes for flight-level comparison
+  - operations for schedule patterns
+  - taxes and changes for market movement
+  - forecasting for forward-looking interpretation
+- Prefer sticky filters and pinned identity columns on dense analytical pages.
+- Default sort order should be chronological when comparing flight options.
+- Use shared filter semantics across frontend, API, and Excel export.
 
 ## Step-by-Step Delivery Order
 
 1. Stabilize the FastAPI reporting contract.
-2. Build the Next.js route monitor application.
-3. Replace Excel-only filtering with API-driven filtering.
-4. Move hosted read paths from PostgreSQL to BigQuery.
-5. Add change-history drilldown.
-6. Add penalty and tax views.
-7. Add ML/DL prediction pages and route-winner views.
-8. Add cycle health and freshness page.
-9. Keep workbook generation as an export path only.
+2. Fix cross-page navigation state and filter consistency.
+3. Replace airline-block ordering with departure-time ordering where route comparison is the primary task.
+4. Replace Excel-only filtering with API-driven filtering.
+5. Add shared date and history controls.
+6. Add change-history drilldown plus market-level Changes dashboard.
+7. Upgrade tax monitoring into a route-comparison and trend surface.
+8. Add Airline Operations route-pattern views.
+9. Add ML/DL prediction pages and route-winner views.
+10. Add round-trip search and display architecture, starting from one-way-compatible trip metadata.
+11. Add cycle health and freshness page.
+12. Keep workbook generation as an export path only.
 
 ## Current File Role Assessment
 
@@ -89,3 +126,7 @@ The web app should support:
 ## Success Condition
 
 The web application becomes the main interactive monitor, Excel remains a downloadable operational artifact, local PostgreSQL remains the collection/training store, and BigQuery becomes both the historical analytics layer and the hosted read layer.
+
+## Round-Trip Note
+
+Round-trip support now starts from shared search-intent metadata instead of replacing the one-way fact model. See [docs/ROUND_TRIP_ARCHITECTURE.md](ROUND_TRIP_ARCHITECTURE.md).

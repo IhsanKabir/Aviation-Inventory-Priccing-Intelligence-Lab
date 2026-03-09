@@ -49,6 +49,12 @@ export type RouteItem = {
   route_key: string;
   origin: string;
   destination: string;
+  route_type?: string | null;
+  origin_country_code?: string | null;
+  destination_country_code?: string | null;
+  country_pair?: string | null;
+  domestic_country_code?: string | null;
+  is_cross_border?: boolean | null;
   offer_rows?: number;
   airlines_present?: number;
 };
@@ -60,6 +66,12 @@ export type SnapshotRow = {
   origin: string;
   destination: string;
   route_key: string;
+  route_type?: string | null;
+  origin_country_code?: string | null;
+  destination_country_code?: string | null;
+  country_pair?: string | null;
+  domestic_country_code?: string | null;
+  is_cross_border?: boolean | null;
   flight_number: string;
   departure_utc?: string;
   cabin?: string | null;
@@ -112,6 +124,12 @@ export type RouteMonitorFlightGroup = {
   departure_time?: string | null;
   cabin?: string | null;
   aircraft?: string | null;
+  search_trip_type?: string | null;
+  trip_request_id?: string | null;
+  requested_return_date?: string | null;
+  leg_direction?: string | null;
+  leg_sequence?: number | null;
+  itinerary_leg_count?: number | null;
 };
 
 export type RouteMonitorMatrixDateGroup = {
@@ -124,6 +142,20 @@ export type RouteMonitorMatrixRoute = {
   route_key: string;
   origin: string;
   destination: string;
+  route_type?: string | null;
+  origin_country_code?: string | null;
+  destination_country_code?: string | null;
+  country_pair?: string | null;
+  domestic_country_code?: string | null;
+  is_cross_border?: boolean | null;
+  search_trip_type?: string | null;
+  trip_pair_key?: string | null;
+  trip_request_id?: string | null;
+  requested_outbound_date?: string | null;
+  requested_return_date?: string | null;
+  trip_duration_days?: number | null;
+  trip_origin?: string | null;
+  trip_destination?: string | null;
   flight_groups: RouteMonitorFlightGroup[];
   date_groups: RouteMonitorMatrixDateGroup[];
 };
@@ -134,6 +166,72 @@ export type RouteMonitorMatrixPayload = {
   signal_counts?: Record<string, number>;
 };
 
+export type OperationsWeekdayProfile = {
+  day_label: string;
+  flight_instance_count: number;
+  active_date_count: number;
+  airline_count?: number;
+  airlines?: string[];
+};
+
+export type OperationsTimelinePoint = {
+  cycle_id: string;
+  cycle_completed_at_utc?: string | null;
+  flight_instance_count: number;
+  active_date_count: number;
+  airline_count?: number;
+  first_departure_time?: string | null;
+  last_departure_time?: string | null;
+};
+
+export type OperationsAirlineRow = {
+  airline: string;
+  flight_instance_count: number;
+  active_date_count: number;
+  first_departure_time?: string | null;
+  last_departure_time?: string | null;
+  departure_times: string[];
+  flight_numbers: string[];
+  weekday_profile: OperationsWeekdayProfile[];
+  timeline: OperationsTimelinePoint[];
+};
+
+export type OperationsDepartureDay = {
+  departure_date: string;
+  day_label: string;
+  flight_instance_count: number;
+  airline_count: number;
+  first_departure_time?: string | null;
+  last_departure_time?: string | null;
+};
+
+export type OperationsRoute = {
+  route_key: string;
+  origin: string;
+  destination: string;
+  route_type?: string | null;
+  origin_country_code?: string | null;
+  destination_country_code?: string | null;
+  country_pair?: string | null;
+  domestic_country_code?: string | null;
+  is_cross_border?: boolean | null;
+  airline_count: number;
+  flight_instance_count: number;
+  active_date_count: number;
+  first_departure_time?: string | null;
+  last_departure_time?: string | null;
+  departure_times: string[];
+  departure_days: OperationsDepartureDay[];
+  weekday_profile: OperationsWeekdayProfile[];
+  airlines: OperationsAirlineRow[];
+  timeline: OperationsTimelinePoint[];
+};
+
+export type AirlineOperationsPayload = {
+  cycle_id: string | null;
+  routes: OperationsRoute[];
+};
+
 export type PenaltyRow = {
   cycle_id: string;
   captured_at_utc?: string;
@@ -141,6 +239,12 @@ export type PenaltyRow = {
   origin: string;
   destination: string;
   route_key: string;
+  route_type?: string | null;
+  origin_country_code?: string | null;
+  destination_country_code?: string | null;
+  country_pair?: string | null;
+  domestic_country_code?: string | null;
+  is_cross_border?: boolean | null;
   flight_number: string;
   departure_utc?: string;
   cabin?: string | null;
@@ -170,6 +274,12 @@ export type TaxRow = {
   origin: string;
   destination: string;
   route_key: string;
+  route_type?: string | null;
+  origin_country_code?: string | null;
+  destination_country_code?: string | null;
+  country_pair?: string | null;
+  domestic_country_code?: string | null;
+  is_cross_border?: boolean | null;
   flight_number: string;
   departure_utc?: string;
   cabin?: string | null;
@@ -178,9 +288,53 @@ export type TaxRow = {
   currency?: string | null;
 };
 
+export type TaxRouteSummary = {
+  route_key: string;
+  origin: string;
+  destination: string;
+  route_type?: string | null;
+  origin_country_code?: string | null;
+  destination_country_code?: string | null;
+  country_pair?: string | null;
+  domestic_country_code?: string | null;
+  is_cross_border?: boolean | null;
+  row_count?: number | null;
+  airline_count?: number | null;
+  min_tax_amount?: number | null;
+  max_tax_amount?: number | null;
+  avg_tax_amount?: number | null;
+  spread_amount?: number | null;
+  latest_captured_at_utc?: string | null;
+  avg_tax_change_amount?: number | null;
+  timeline?: Array<Record<string, unknown>>;
+};
+
+export type TaxAirlineSummary = {
+  route_key: string;
+  origin: string;
+  destination: string;
+  airline: string;
+  route_type?: string | null;
+  origin_country_code?: string | null;
+  destination_country_code?: string | null;
+  country_pair?: string | null;
+  domestic_country_code?: string | null;
+  is_cross_border?: boolean | null;
+  row_count?: number | null;
+  min_tax_amount?: number | null;
+  max_tax_amount?: number | null;
+  avg_tax_amount?: number | null;
+  spread_amount?: number | null;
+  latest_captured_at_utc?: string | null;
+  avg_tax_change_amount?: number | null;
+  timeline?: Array<Record<string, unknown>>;
+};
+
 export type TaxPayload = {
   cycle_id: string | null;
   rows: TaxRow[];
+  route_summaries?: TaxRouteSummary[];
+  airline_summaries?: TaxAirlineSummary[];
 };
 
 export type ChangeEventRow = {
@@ -192,6 +346,12 @@ export type ChangeEventRow = {
   origin?: string | null;
   destination?: string | null;
   route_key?: string | null;
+  route_type?: string | null;
+  origin_country_code?: string | null;
+  destination_country_code?: string | null;
+  country_pair?: string | null;
+  domestic_country_code?: string | null;
+  is_cross_border?: boolean | null;
   flight_number?: string | null;
   departure_day?: string | null;
   departure_time?: string | null;
@@ -211,6 +371,76 @@ export type ChangeEventRow = {
 
 export type ChangeEventsPayload = {
   items: ChangeEventRow[];
+};
+
+export type ChangeDashboardSummary = {
+  event_count: number;
+  route_count: number;
+  airline_count: number;
+  latest_event_at_utc?: string | null;
+  up_count: number;
+  down_count: number;
+  added_count: number;
+  removed_count: number;
+  price_event_count: number;
+  availability_event_count: number;
+  schedule_event_count: number;
+  tax_event_count: number;
+  penalty_event_count: number;
+};
+
+export type ChangeDashboardDailyPoint = {
+  report_day: string;
+  event_count: number;
+  route_count?: number | null;
+  airline_count?: number | null;
+  up_count?: number | null;
+  down_count?: number | null;
+  added_count?: number | null;
+  removed_count?: number | null;
+};
+
+export type ChangeDashboardRouteSummary = {
+  route_key: string;
+  origin: string;
+  destination: string;
+  route_type?: string | null;
+  origin_country_code?: string | null;
+  destination_country_code?: string | null;
+  country_pair?: string | null;
+  domestic_country_code?: string | null;
+  is_cross_border?: boolean | null;
+  event_count: number;
+  airline_count?: number | null;
+  latest_event_at_utc?: string | null;
+};
+
+export type ChangeDashboardAirlineSummary = {
+  airline: string;
+  event_count: number;
+  route_count?: number | null;
+  latest_event_at_utc?: string | null;
+};
+
+export type ChangeDashboardDomainMixItem = {
+  domain: string;
+  event_count: number;
+};
+
+export type ChangeDashboardFieldMixItem = {
+  field_name?: string | null;
+  display_name: string;
+  event_count: number;
+};
+
+export type ChangeDashboardPayload = {
+  summary: ChangeDashboardSummary;
+  daily_series: ChangeDashboardDailyPoint[];
+  top_routes: ChangeDashboardRouteSummary[];
+  top_airlines: ChangeDashboardAirlineSummary[];
+  domain_mix: ChangeDashboardDomainMixItem[];
+  field_mix: ChangeDashboardFieldMixItem[];
+  largest_moves: ChangeEventRow[];
 };
 
 export type ForecastMetricRow = {
@@ -360,6 +590,13 @@ export async function getLatestCycle() {
   return fetchJsonWithRevalidate<CycleSummary>("/api/v1/reporting/cycles/latest", 30);
 }
 
+export async function getRecentCycles(limit = 10) {
+  return fetchJsonWithRevalidate<{ items: CycleSummary[] }>(
+    buildPath("/api/v1/reporting/cycles/recent", { limit }),
+    60
+  );
+}
+
 export async function getAirlines() {
   return fetchJsonWithRevalidate<{ items: AirlineItem[] }>("/api/v1/meta/airlines", 900);
 }
@@ -398,7 +635,14 @@ export async function getCurrentSnapshotPayload(query: SnapshotQuery) {
   );
 }
 
-export async function getRouteMonitorMatrixPayload(query: SnapshotQuery & { routeLimit?: number; historyLimit?: number }) {
+export async function getRouteMonitorMatrixPayload(
+  query: SnapshotQuery & {
+    tripTypes?: string[];
+    returnDate?: string;
+    routeLimit?: number;
+    historyLimit?: number;
+  }
+) {
   return fetchJsonWithRevalidate<RouteMonitorMatrixPayload>(
     buildPath("/api/v1/reporting/route-monitor-matrix", {
       cycle_id: query.cycleId,
@@ -406,8 +650,35 @@ export async function getRouteMonitorMatrixPayload(query: SnapshotQuery & { rout
       origin: query.origins,
       destination: query.destinations,
       cabin: query.cabins,
+      trip_type: query.tripTypes,
+      return_date: query.returnDate,
       route_limit: query.routeLimit,
       history_limit: query.historyLimit
+    }),
+    60
+  );
+}
+
+export async function getAirlineOperationsPayload(
+  query: SnapshotQuery & {
+    routeTypes?: string[];
+    startDate?: string;
+    endDate?: string;
+    routeLimit?: number;
+    trendLimit?: number;
+  }
+) {
+  return fetchJsonWithRevalidate<AirlineOperationsPayload>(
+    buildPath("/api/v1/reporting/airline-operations", {
+      cycle_id: query.cycleId,
+      airline: query.airlines,
+      origin: query.origins,
+      destination: query.destinations,
+      route_type: query.routeTypes,
+      start_date: query.startDate,
+      end_date: query.endDate,
+      route_limit: query.routeLimit,
+      trend_limit: query.trendLimit
     }),
     60
   );
@@ -426,14 +697,21 @@ export async function getPenaltyPayload(query: SnapshotQuery) {
   );
 }
 
-export async function getTaxPayload(query: SnapshotQuery) {
+export async function getTaxPayload(
+  query: SnapshotQuery & {
+    routeTypes?: string[];
+    trendLimit?: number;
+  }
+) {
   return fetchJsonWithRevalidate<TaxPayload>(
     buildPath("/api/v1/reporting/taxes", {
       cycle_id: query.cycleId,
       airline: query.airlines,
       origin: query.origins,
       destination: query.destinations,
-      limit: query.limit
+      route_type: query.routeTypes,
+      limit: query.limit,
+      trend_limit: query.trendLimit
     }),
     60
   );
@@ -461,6 +739,33 @@ export async function getChangeEventsPayload(query: {
       start_date: query.startDate,
       end_date: query.endDate,
       limit: query.limit
+    }),
+    60
+  );
+}
+
+export async function getChangeDashboardPayload(query: {
+  airlines?: string[];
+  origins?: string[];
+  destinations?: string[];
+  domains?: string[];
+  changeTypes?: string[];
+  directions?: string[];
+  startDate?: string;
+  endDate?: string;
+  topN?: number;
+}) {
+  return fetchJsonWithRevalidate<ChangeDashboardPayload>(
+    buildPath("/api/v1/reporting/change-dashboard", {
+      airline: query.airlines,
+      origin: query.origins,
+      destination: query.destinations,
+      domain: query.domains,
+      change_type: query.changeTypes,
+      direction: query.directions,
+      start_date: query.startDate,
+      end_date: query.endDate,
+      top_n: query.topN
     }),
     60
   );

@@ -60,7 +60,18 @@ CREATE TABLE IF NOT EXISTS `__PROJECT_ID__.__DATASET__.fact_offer_snapshot` (
   duration_min INT64,
   stops INT64,
   soldout BOOL,
-  penalty_source STRING
+  penalty_source STRING,
+  search_trip_type STRING,
+  trip_request_id STRING,
+  requested_outbound_date DATE,
+  requested_return_date DATE,
+  trip_duration_days INT64,
+  trip_origin STRING,
+  trip_destination STRING,
+  trip_pair_key STRING,
+  leg_direction STRING,
+  leg_sequence INT64,
+  itinerary_leg_count INT64
 )
 PARTITION BY DATE(captured_at_utc)
 CLUSTER BY airline, origin, destination, departure_date;

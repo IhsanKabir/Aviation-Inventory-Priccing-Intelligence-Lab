@@ -9,7 +9,7 @@ import type {
   RouteMonitorMatrixPayload,
   RouteMonitorMatrixRoute
 } from "@/lib/api";
-import { formatDhakaDate, formatDhakaDateTime, formatMoney, formatPercent } from "@/lib/format";
+import { formatDhakaDate, formatDhakaDateTime, formatMoney, formatPercent, formatRouteGeo, formatRouteType } from "@/lib/format";
 
 type ViewMode = "context" | "strict";
 type SignalKey = "increase" | "decrease" | "new" | "sold_out" | "unknown";
@@ -138,6 +138,69 @@ function formatLeaderDates(values: string[]) {
     .join(", ");
 }
 
+function sortFlightGroups(flightGroups: RouteMonitorFlightGroup[]) {
+  return flightGroups.slice().sort((left, right) => {
+    const leftLegSequence = left.leg_sequence ?? (left.leg_direction === "inbound" ? 2 : 1);
+    const rightLegSequence = right.leg_sequence ?? (right.leg_direction === "inbound" ? 2 : 1);
+    if (leftLegSequence !== rightLegSequence) {
+      return leftLegSequence - rightLegSequence;
+    }
+
+    const leftReturn = (left.requested_return_date ?? "").trim();
+    const rightReturn = (right.requested_return_date ?? "").trim();
+    if (leftReturn !== rightReturn) {
+      if (!leftReturn) return -1;
+      if (!rightReturn) return 1;
+      return leftReturn.localeCompare(rightReturn);
+    }
+
+    const leftTime = (left.departure_time ?? "").trim();
+    const rightTime = (right.departure_time ?? "").trim();
+
+    if (leftTime !== rightTime) {
+      if (!leftTime) return 1;
+      if (!rightTime) return -1;
+      return leftTime.localeCompare(rightTime);
+    }
+
+    const airlineDiff = left.airline.localeCompare(right.airline);
+    if (airlineDiff !== 0) {
+      return airlineDiff;
+    }
+
+    return left.flight_number.localeCompare(right.flight_number);
+  });
+}
+
+function tripDateLabel(value?: string | null) {
+  if (!value) {
+    return "-";
+  }
+  return formatDhakaDate(`${value}T00:00:00Z`).replace(",", "");
+}
+
+function routeSectionSortValue(route: RouteMonitorMatrixRoute) {
+  const outboundOrigin = (route.trip_origin ?? "").trim().toUpperCase();
+  const outboundDestination = (route.trip_destination ?? "").trim().toUpperCase();
+  const routeOrigin = (route.origin ?? "").trim().toUpperCase();
+  const routeDestination = (route.destination ?? "").trim().toUpperCase();
+  if (outboundOrigin && outboundDestination && routeOrigin === outboundOrigin && routeDestination === outboundDestination) {
+    return 0;
+  }
+  return 1;
+}
+
+function flightLegLabel(flight: RouteMonitorFlightGroup) {
+  if ((flight.search_trip_type ?? "OW") !== "RT") {
+    return null;
+  }
+  const direction = flight.leg_direction === "inbound" ? "Inbound" : "Outbound";
+  if (flight.requested_return_date) {
+    return `${direction} · return ${tripDateLabel(flight.requested_return_date)}`;
+  }
+  return direction;
+}
+
 export function RouteMonitorMatrix({
   payload,
   initialAirlines = []
@@ -174,7 +237,8 @@ export function RouteMonitorMatrix({
           return null;
         }
 
-        const visibleFlightSet = new Set(flightGroups.map((item) => item.flight_group_id));
+        const sortedFlightGroups = sortFlightGroups(flightGroups);
+        const visibleFlightSet = new Set(sortedFlightGroups.map((item) => item.flight_group_id));
         const dateGroups = route.date_groups
           .map((dateGroup) => {
             const captures = dateGroup.captures
@@ -203,12 +267,77 @@ export function RouteMonitorMatrix({
 
         return {
           ...route,
-          flight_groups: flightGroups,
+          flight_groups: sortedFlightGroups,
           date_groups: dateGroups
         };
       })
       .filter(Boolean) as RouteMonitorMatrixRoute[];
   }, [payload.routes, selectedAirlines, selectedSignals, viewMode]);
+
+  const visibleSections = useMemo(() => {
+    const sections = new Map<
+      string,
+      {
+        key: string;
+        searchTripType: string;
+        tripPairKey?: string | null;
+        requestedOutboundDate?: string | null;
+        requestedReturnDate?: string | null;
+        tripDurationDays?: number | null;
+        routes: RouteMonitorMatrixRoute[];
+      }
+    >();
+
+    for (const route of visibleRoutes) {
+      const isRoundTrip = (route.search_trip_type ?? "OW") === "RT" && route.trip_pair_key;
+      const key = isRoundTrip ? `rt:${route.trip_pair_key}` : `ow:${route.route_key}`;
+      if (!sections.has(key)) {
+        sections.set(key, {
+          key,
+          searchTripType: route.search_trip_type ?? "OW",
+          tripPairKey: route.trip_pair_key,
+          requestedOutboundDate: route.requested_outbound_date,
+          requestedReturnDate: route.requested_return_date,
+          tripDurationDays: route.trip_duration_days,
+          routes: []
+        });
+      }
+      sections.get(key)!.routes.push(route);
+    }
+
+    return Array.from(sections.values())
+      .map((section) => ({
+        ...section,
+        routes: section.routes.slice().sort((left, right) => {
+          const legSort = routeSectionSortValue(left) - routeSectionSortValue(right);
+          if (legSort !== 0) {
+            return legSort;
+          }
+          return left.route_key.localeCompare(right.route_key);
+        })
+      }))
+      .sort((left, right) => left.key.localeCompare(right.key));
+  }, [visibleRoutes]);
+
+  const showSeatColumn = useMemo(() => {
+    return visibleRoutes.some((route) =>
+      route.date_groups.some((dateGroup) =>
+        dateGroup.captures.some((capture) =>
+          capture.cells.some((cell) => cell.seat_available != null || cell.seat_capacity != null)
+        )
+      )
+    );
+  }, [visibleRoutes]);
+
+  const showLoadColumn = useMemo(() => {
+    return visibleRoutes.some((route) =>
+      route.date_groups.some((dateGroup) =>
+        dateGroup.captures.some((capture) =>
+          capture.cells.some((cell) => cell.load_factor_pct != null)
+        )
+      )
+    );
+  }, [visibleRoutes]);
 
   const signalCounts = useMemo(() => {
     const counts: Record<SignalKey, number> = {
@@ -331,187 +460,237 @@ export function RouteMonitorMatrix({
       </div>
 
       <div className="route-report-stack">
-        {visibleRoutes.length === 0 ? (
+        {visibleSections.length === 0 ? (
           <div className="empty-state">No route blocks match the current airline or signal selection.</div>
         ) : (
-          visibleRoutes.map((route) => {
-            const leader = routeLeader(route, route.flight_groups);
+          visibleSections.map((section) => {
+            const roundTripShell = section.searchTripType === "RT" && section.tripPairKey;
             return (
-              <section className="route-report-block" key={route.route_key}>
-                <div className="route-report-title-row">
-                  <div className="route-report-title">{route.route_key}</div>
-                  <div className="route-report-leader">
-                    <span className="route-report-leader-label">Route Price Leader (Lowest Fare):</span>{" "}
-                    {leader ? (
-                      <>
-                        <span
-                          className={`leader-airline ${themeForAirline(leader.airline).headerText === "#1e1e1e" ? "leader-airline-dark" : ""}`}
-                          style={{
-                            background: themeForAirline(leader.airline).header,
-                            color: themeForAirline(leader.airline).headerText
-                          }}
-                        >
-                          {leader.airline}
-                          {leader.flightNumber}
-                        </span>{" "}
-                        <span className="leader-amount">{leader.amount.toLocaleString()}</span>{" "}
-                        <span className="leader-dates">(Dates: {formatLeaderDates(leader.dates)})</span>
-                      </>
-                    ) : (
-                      "No visible fare leader"
-                    )}
+              <section className={roundTripShell ? "roundtrip-route-shell" : "roundtrip-route-shell single"} key={section.key}>
+                {roundTripShell ? (
+                  <div className="roundtrip-route-header">
+                    <div>
+                      <strong>{section.tripPairKey}</strong>
+                      <span>
+                        Outbound {tripDateLabel(section.requestedOutboundDate)} · Return {tripDateLabel(section.requestedReturnDate)}
+                      </span>
+                    </div>
+                    <div className="roundtrip-route-meta">
+                      <span className="route-type-pill" data-type="RT">RT</span>
+                      <span>{section.tripDurationDays != null ? `${section.tripDurationDays}d trip` : "Linked itinerary view"}</span>
+                    </div>
                   </div>
-                </div>
+                ) : null}
 
-                <div className="route-report-scroll">
-                  <table className="route-report-table">
-                    <thead>
-                      <tr>
-                        <th className="sticky-col sticky-route-meta" rowSpan={3}>
-                          Date
-                        </th>
-                        <th className="sticky-col sticky-route-meta second" rowSpan={3}>
-                          Day
-                        </th>
-                        <th className="sticky-col sticky-route-meta third" rowSpan={3}>
-                          Capture Date/Time
-                        </th>
-                        {route.flight_groups.map((flight) => {
-                          const theme = themeForAirline(flight.airline);
-                          return (
-                            <th
-                              className="flight-band"
-                              colSpan={5}
-                              key={flight.flight_group_id}
-                              style={{ background: theme.header, color: theme.headerText }}
-                            >
-                              {flight.airline}
-                              {flight.flight_number} | {flight.aircraft || "Flight"}
-                            </th>
-                          );
-                        })}
-                      </tr>
-                      <tr>
-                        {route.flight_groups.map((flight) => {
-                          const theme = themeForAirline(flight.airline);
-                          return (
-                            <th
-                              className="flight-subband"
-                              colSpan={5}
-                              key={`sub-${flight.flight_group_id}`}
-                              style={{ background: theme.header, color: theme.headerText }}
-                            >
-                              {flight.departure_time || "\u2014"}
-                            </th>
-                          );
-                        })}
-                      </tr>
-                      <tr>
-                        {route.flight_groups.map((flight) => {
-                          const theme = themeForAirline(flight.airline);
-                          return (
-                            <Fragment key={`metrics-${flight.flight_group_id}`}>
-                              <th className="metric-head" key={`${flight.flight_group_id}-min`} style={{ background: theme.sub, color: theme.text }}>
-                                Min Fare
-                              </th>
-                              <th className="metric-head" key={`${flight.flight_group_id}-max`} style={{ background: theme.sub, color: theme.text }}>
-                                Max Fare
-                              </th>
-                              <th className="metric-head" key={`${flight.flight_group_id}-tax`} style={{ background: theme.sub, color: theme.text }}>
-                                Tax Amount
-                              </th>
-                              <th className="metric-head" key={`${flight.flight_group_id}-seat`} style={{ background: theme.sub, color: theme.text }}>
-                                Open/Cap
-                              </th>
-                              <th className="metric-head" key={`${flight.flight_group_id}-load`} style={{ background: theme.sub, color: theme.text }}>
-                                Inv Press
-                              </th>
-                            </Fragment>
-                          );
-                        })}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {route.date_groups.map((dateGroup) => {
-                        const rowKey = `${route.route_key}-${dateGroup.departure_date}`;
-                        const expanded = Boolean(expandedRows[rowKey]);
-                        const visibleCaptures = expanded ? dateGroup.captures : dateGroup.captures.slice(0, 1);
+                <div className="route-report-stack nested">
+                  {section.routes.map((route) => {
+                    const leader = routeLeader(route, route.flight_groups);
+                    return (
+                      <section className="route-report-block" key={`${section.key}-${route.route_key}`}>
+                        <div className="route-report-title-row">
+                          <div className="route-report-title">
+                            <strong>{route.route_key}</strong>
+                            <div className="route-report-title-meta">
+                              <span className="route-type-pill" data-type={formatRouteType(route.route_type)}>
+                                {formatRouteType(route.route_type)}
+                              </span>
+                              <span className="route-geo">{formatRouteGeo(route.origin_country_code, route.destination_country_code)}</span>
+                              {route.search_trip_type === "RT" ? <span className="trip-leg-pill">{route.origin === route.trip_origin ? "Outbound" : "Inbound"}</span> : null}
+                            </div>
+                          </div>
+                          <div className="route-report-leader">
+                            <span className="route-report-leader-label">Route Price Leader (Lowest Fare):</span>{" "}
+                            {leader ? (
+                              <>
+                                <span
+                                  className={`leader-airline ${themeForAirline(leader.airline).headerText === "#1e1e1e" ? "leader-airline-dark" : ""}`}
+                                  style={{
+                                    background: themeForAirline(leader.airline).header,
+                                    color: themeForAirline(leader.airline).headerText
+                                  }}
+                                >
+                                  {leader.airline}
+                                  {leader.flightNumber}
+                                </span>{" "}
+                                <span className="leader-amount">{leader.amount.toLocaleString()}</span>{" "}
+                                <span className="leader-dates">(Dates: {formatLeaderDates(leader.dates)})</span>
+                              </>
+                            ) : (
+                              "No visible fare leader"
+                            )}
+                          </div>
+                        </div>
 
-                        return visibleCaptures.map((capture, captureIndex) => {
-                          const showDateMeta = captureIndex === 0;
-                          const expandLabel =
-                            dateGroup.captures.length > 1
-                              ? `${expanded ? "[-]" : `[+${dateGroup.captures.length - 1}]`} ${formatDhakaDateTime(capture.captured_at_utc)}`
-                              : formatDhakaDateTime(capture.captured_at_utc);
+                        <div className="route-report-scroll">
+                          <table className="route-report-table">
+                            <thead>
+                              <tr>
+                                <th className="sticky-col sticky-route-meta" rowSpan={3}>
+                                  Date
+                                </th>
+                                <th className="sticky-col sticky-route-meta second" rowSpan={3}>
+                                  Day
+                                </th>
+                                <th className="sticky-col sticky-route-meta third" rowSpan={3}>
+                                  Capture Date/Time
+                                </th>
+                                {route.flight_groups.map((flight) => {
+                                  const theme = themeForAirline(flight.airline);
+                                  const metricColumnCount = 3 + (showSeatColumn ? 1 : 0) + (showLoadColumn ? 1 : 0);
+                                  return (
+                                    <th
+                                      className="flight-band"
+                                      colSpan={metricColumnCount}
+                                      key={flight.flight_group_id}
+                                      style={{ background: theme.header, color: theme.headerText }}
+                                    >
+                                      {flight.airline}
+                                      {flight.flight_number} | {flight.aircraft || "Flight"}
+                                    </th>
+                                  );
+                                })}
+                              </tr>
+                              <tr>
+                                {route.flight_groups.map((flight) => {
+                                  const theme = themeForAirline(flight.airline);
+                                  const metricColumnCount = 3 + (showSeatColumn ? 1 : 0) + (showLoadColumn ? 1 : 0);
+                                  return (
+                                    <th
+                                      className="flight-subband"
+                                      colSpan={metricColumnCount}
+                                      key={`sub-${flight.flight_group_id}`}
+                                      style={{ background: theme.header, color: theme.headerText }}
+                                    >
+                                      <div className="flight-subband-stack">
+                                        <span>{flight.departure_time || "\u2014"}</span>
+                                        {flightLegLabel(flight) ? <span>{flightLegLabel(flight)}</span> : null}
+                                      </div>
+                                    </th>
+                                  );
+                                })}
+                              </tr>
+                              <tr>
+                                {route.flight_groups.map((flight) => {
+                                  const theme = themeForAirline(flight.airline);
+                                  return (
+                                    <Fragment key={`metrics-${flight.flight_group_id}`}>
+                                      <th className="metric-head" key={`${flight.flight_group_id}-min`} style={{ background: theme.sub, color: theme.text }}>
+                                        Min Fare
+                                      </th>
+                                      <th className="metric-head" key={`${flight.flight_group_id}-max`} style={{ background: theme.sub, color: theme.text }}>
+                                        Max Fare
+                                      </th>
+                                      <th className="metric-head" key={`${flight.flight_group_id}-tax`} style={{ background: theme.sub, color: theme.text }}>
+                                        Tax Amount
+                                      </th>
+                                      {showSeatColumn ? (
+                                        <th className="metric-head" key={`${flight.flight_group_id}-seat`} style={{ background: theme.sub, color: theme.text }}>
+                                          Open/Cap
+                                        </th>
+                                      ) : null}
+                                      {showLoadColumn ? (
+                                        <th className="metric-head" key={`${flight.flight_group_id}-load`} style={{ background: theme.sub, color: theme.text }}>
+                                          Inv Press
+                                        </th>
+                                      ) : null}
+                                    </Fragment>
+                                  );
+                                })}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {route.date_groups.map((dateGroup) => {
+                                const rowKey = `${route.route_key}-${dateGroup.departure_date}`;
+                                const expanded = Boolean(expandedRows[rowKey]);
+                                const visibleCaptures = expanded ? dateGroup.captures : dateGroup.captures.slice(0, 1);
 
-                          return (
-                            <tr
-                              className={capture.is_latest ? "latest-capture-row" : "history-capture-row"}
-                              data-group-start={captureIndex === 0}
-                              data-group-end={captureIndex === visibleCaptures.length - 1}
-                              key={`${rowKey}-${capture.captured_at_utc}`}
-                            >
-                              <td className="sticky-col sticky-route-meta route-value">{showDateMeta ? dateGroup.departure_date : ""}</td>
-                              <td className="sticky-col sticky-route-meta second route-value">{showDateMeta ? dateGroup.day_label : ""}</td>
-                              <td className="sticky-col sticky-route-meta third route-value">
-                                {showDateMeta && dateGroup.captures.length > 1 ? (
-                                  <button className="history-toggle" data-expanded={expanded} onClick={() => toggleRow(rowKey)} type="button">
-                                    {expandLabel}
-                                  </button>
-                                ) : (
-                                  expandLabel
-                                )}
-                              </td>
-                              {route.flight_groups.flatMap((flight) => {
-                                const theme = themeForAirline(flight.airline);
-                                const cell = capture.cells.find((item) => item.flight_group_id === flight.flight_group_id);
-                                const summary = summarizeCell(cell);
-                                const signal = (cell?.signal ?? "unknown") as SignalKey;
-                                return [
-                                  <td
-                                    className={`report-cell signal-${signal}`}
-                                    key={`${capture.captured_at_utc}-${flight.flight_group_id}-min`}
-                                    style={{ background: theme.cell, color: theme.text }}
-                                  >
-                                    <span className="metric-value-text">{summary.minFare}</span>
-                                    {signalArrow(signal) ? <span className={`metric-arrow ${signal}`}>{signalArrow(signal)}</span> : null}
-                                  </td>,
-                                  <td
-                                    className={`report-cell signal-${signal}`}
-                                    key={`${capture.captured_at_utc}-${flight.flight_group_id}-max`}
-                                    style={{ background: theme.cell, color: theme.text }}
-                                  >
-                                    {summary.maxFare}
-                                  </td>,
-                                  <td
-                                    className="report-cell"
-                                    key={`${capture.captured_at_utc}-${flight.flight_group_id}-tax`}
-                                    style={{ background: theme.cell, color: theme.text }}
-                                  >
-                                    {summary.tax}
-                                  </td>,
-                                  <td
-                                    className="report-cell"
-                                    key={`${capture.captured_at_utc}-${flight.flight_group_id}-seat`}
-                                    style={{ background: theme.cell, color: theme.text }}
-                                  >
-                                    {summary.seats}
-                                  </td>,
-                                  <td
-                                    className="report-cell"
-                                    key={`${capture.captured_at_utc}-${flight.flight_group_id}-load`}
-                                    style={{ background: theme.cell, color: theme.text }}
-                                  >
-                                    {summary.load}
-                                  </td>
-                                ];
+                                return visibleCaptures.map((capture, captureIndex) => {
+                                  const showDateMeta = captureIndex === 0;
+                                  const expandLabel =
+                                    dateGroup.captures.length > 1
+                                      ? `${expanded ? "[-]" : `[+${dateGroup.captures.length - 1}]`} ${formatDhakaDateTime(capture.captured_at_utc)}`
+                                      : formatDhakaDateTime(capture.captured_at_utc);
+
+                                  return (
+                                    <tr
+                                      className={capture.is_latest ? "latest-capture-row" : "history-capture-row"}
+                                      data-group-start={captureIndex === 0}
+                                      data-group-end={captureIndex === visibleCaptures.length - 1}
+                                      key={`${rowKey}-${capture.captured_at_utc}`}
+                                    >
+                                      <td className="sticky-col sticky-route-meta route-value">{showDateMeta ? dateGroup.departure_date : ""}</td>
+                                      <td className="sticky-col sticky-route-meta second route-value">{showDateMeta ? dateGroup.day_label : ""}</td>
+                                      <td className="sticky-col sticky-route-meta third route-value">
+                                        {showDateMeta && dateGroup.captures.length > 1 ? (
+                                          <button className="history-toggle" data-expanded={expanded} onClick={() => toggleRow(rowKey)} type="button">
+                                            {expandLabel}
+                                          </button>
+                                        ) : (
+                                          expandLabel
+                                        )}
+                                      </td>
+                                      {route.flight_groups.flatMap((flight) => {
+                                        const theme = themeForAirline(flight.airline);
+                                        const cell = capture.cells.find((item) => item.flight_group_id === flight.flight_group_id);
+                                        const summary = summarizeCell(cell);
+                                        const signal = (cell?.signal ?? "unknown") as SignalKey;
+                                        return [
+                                          <td
+                                            className={`report-cell signal-${signal}`}
+                                            key={`${capture.captured_at_utc}-${flight.flight_group_id}-min`}
+                                            style={{ background: theme.cell, color: theme.text }}
+                                          >
+                                            <span className="metric-value-text">{summary.minFare}</span>
+                                            {signalArrow(signal) ? <span className={`metric-arrow ${signal}`}>{signalArrow(signal)}</span> : null}
+                                          </td>,
+                                          <td
+                                            className={`report-cell signal-${signal}`}
+                                            key={`${capture.captured_at_utc}-${flight.flight_group_id}-max`}
+                                            style={{ background: theme.cell, color: theme.text }}
+                                          >
+                                            {summary.maxFare}
+                                          </td>,
+                                          <td
+                                            className="report-cell"
+                                            key={`${capture.captured_at_utc}-${flight.flight_group_id}-tax`}
+                                            style={{ background: theme.cell, color: theme.text }}
+                                          >
+                                            {summary.tax}
+                                          </td>,
+                                          ...(showSeatColumn
+                                            ? [
+                                                <td
+                                                  className="report-cell"
+                                                  key={`${capture.captured_at_utc}-${flight.flight_group_id}-seat`}
+                                                  style={{ background: theme.cell, color: theme.text }}
+                                                >
+                                                  {summary.seats}
+                                                </td>
+                                              ]
+                                            : []),
+                                          ...(showLoadColumn
+                                            ? [
+                                                <td
+                                                  className="report-cell"
+                                                  key={`${capture.captured_at_utc}-${flight.flight_group_id}-load`}
+                                                  style={{ background: theme.cell, color: theme.text }}
+                                                >
+                                                  {summary.load}
+                                                </td>
+                                              ]
+                                            : [])
+                                        ];
+                                      })}
+                                    </tr>
+                                  );
+                                });
                               })}
-                            </tr>
-                          );
-                        });
-                      })}
-                    </tbody>
-                  </table>
+                            </tbody>
+                          </table>
+                        </div>
+                      </section>
+                    );
+                  })}
                 </div>
               </section>
             );

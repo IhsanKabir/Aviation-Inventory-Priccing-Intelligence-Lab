@@ -92,7 +92,18 @@ def _query_fact_offer_snapshot() -> str:
             frm.duration_min,
             frm.stops,
             frm.soldout,
-            frm.penalty_source
+            frm.penalty_source,
+            COALESCE(frm.search_trip_type, 'OW') AS search_trip_type,
+            frm.trip_request_id,
+            frm.requested_outbound_date,
+            frm.requested_return_date,
+            frm.trip_duration_days,
+            frm.trip_origin,
+            frm.trip_destination,
+            COALESCE(frm.trip_origin, fo.origin) || '-' || COALESCE(frm.trip_destination, fo.destination) AS trip_pair_key,
+            COALESCE(frm.leg_direction, 'outbound') AS leg_direction,
+            frm.leg_sequence,
+            frm.itinerary_leg_count
         FROM flight_offers fo
         LEFT JOIN flight_offer_raw_meta frm
             ON frm.flight_offer_id = fo.id
@@ -537,6 +548,73 @@ def _normalize_for_parquet(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+FACT_OFFER_SNAPSHOT_STRING_COLUMNS = {
+    "cycle_id",
+    "airline",
+    "origin",
+    "destination",
+    "route_key",
+    "flight_number",
+    "cabin",
+    "brand",
+    "fare_basis",
+    "currency",
+    "booking_class",
+    "baggage",
+    "aircraft",
+    "penalty_source",
+    "search_trip_type",
+    "trip_request_id",
+    "trip_origin",
+    "trip_destination",
+    "trip_pair_key",
+    "leg_direction",
+}
+
+FACT_OFFER_SNAPSHOT_DATE_COLUMNS = {
+    "departure_date",
+    "requested_outbound_date",
+    "requested_return_date",
+}
+
+FACT_OFFER_SNAPSHOT_INT_COLUMNS = {
+    "trip_duration_days",
+    "leg_sequence",
+    "itinerary_leg_count",
+}
+
+FACT_OFFER_SNAPSHOT_FLOAT_COLUMNS = {
+    "total_price_bdt",
+    "base_fare_amount",
+    "tax_amount",
+    "seat_available",
+    "seat_capacity",
+    "load_factor_pct",
+    "duration_min",
+    "stops",
+}
+
+
+def _normalize_fact_offer_snapshot_types(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    out = df.copy()
+    for column in FACT_OFFER_SNAPSHOT_STRING_COLUMNS:
+        if column in out.columns:
+            out[column] = out[column].astype("string")
+    for column in FACT_OFFER_SNAPSHOT_DATE_COLUMNS:
+        if column in out.columns:
+            out[column] = pd.to_datetime(out[column], errors="coerce").dt.date.astype("object")
+    for column in FACT_OFFER_SNAPSHOT_INT_COLUMNS:
+        if column in out.columns:
+            out[column] = pd.to_numeric(out[column], errors="coerce").astype("Int64")
+    for column in FACT_OFFER_SNAPSHOT_FLOAT_COLUMNS:
+        if column in out.columns:
+            out[column] = pd.to_numeric(out[column], errors="coerce").astype("Float64")
+    return out
+
+
 FILE_EXPORTERS = {
     "fact_forecast_bundle": _export_fact_forecast_bundle,
     "fact_forecast_model_eval": _export_fact_forecast_model_eval,
@@ -787,23 +865,41 @@ def _normalize_forecast_table_types(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _load_bigquery(file_path: Path, table_name: str, project_id: str, dataset: str, replace: bool) -> dict[str, Any]:
+def _load_bigquery(
+    file_path: Path,
+    table_name: str,
+    project_id: str,
+    dataset: str,
+    replace: bool,
+    df: pd.DataFrame | None = None,
+) -> dict[str, Any]:
     from google.cloud import bigquery
 
     client = bigquery.Client(project=project_id)
     table_id = f"{project_id}.{dataset}.{table_name}"
     job_config = bigquery.LoadJobConfig(
-        source_format=bigquery.SourceFormat.PARQUET,
         write_disposition=(
             bigquery.WriteDisposition.WRITE_TRUNCATE
             if replace
             else bigquery.WriteDisposition.WRITE_APPEND
         ),
     )
+    existing_schema = None
+    try:
+        existing_schema = client.get_table(table_id).schema
+    except Exception:
+        existing_schema = None
+    if existing_schema:
+        job_config.schema = existing_schema
 
-    with file_path.open("rb") as handle:
-        job = client.load_table_from_file(handle, table_id, job_config=job_config)
+    if df is not None:
+        job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
         job.result()
+    else:
+        job_config.source_format = bigquery.SourceFormat.PARQUET
+        with file_path.open("rb") as handle:
+            job = client.load_table_from_file(handle, table_id, job_config=job_config)
+            job.result()
 
     table = client.get_table(table_id)
     return {"table_id": table_id, "rows": table.num_rows}
@@ -835,6 +931,7 @@ def main() -> int:
     end_dt = datetime.fromisoformat(end_ts)
 
     exports: list[dict[str, Any]] = []
+    export_frames: dict[str, pd.DataFrame] = {}
     bq_results: list[dict[str, Any]] = []
 
     for table_name in tables:
@@ -848,10 +945,14 @@ def main() -> int:
             sql = EXPORT_QUERIES.get(table_name)
             if not sql:
                 raise SystemExit(f"Unknown table export: {table_name}")
-            df = _normalize_for_parquet(_read_query(engine, sql, params=params))
+            df = _read_query(engine, sql, params=params)
+            if table_name == "fact_offer_snapshot":
+                df = _normalize_fact_offer_snapshot_types(df)
+            df = _normalize_for_parquet(df)
         file_path = stage_root / f"{table_name}.parquet"
         df.to_parquet(file_path, index=False)
         exports.append({"table": table_name, "rows": int(len(df)), "file": str(file_path)})
+        export_frames[table_name] = df
 
     if args.load_bigquery:
         project_id = args.project_id or os.getenv("BIGQUERY_PROJECT_ID", "").strip()
@@ -865,6 +966,7 @@ def main() -> int:
                 project_id=project_id,
                 dataset=dataset,
                 replace=args.replace,
+                df=export_frames.get(exported["table"]),
             )
             bq_results.append(result)
 

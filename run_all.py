@@ -38,6 +38,7 @@ from engines.route_scope import (
     parse_csv_upper_codes,
     route_matches_scope,
 )
+from core.trip_context import apply_trip_context, build_trip_context, normalize_trip_type
 from modules.penalties import apply_penalty_inference
 
 ENABLE_STRATEGY_ENGINE = os.getenv("ENABLE_STRATEGY_ENGINE", "0").strip().lower() in {
@@ -114,6 +115,15 @@ def parse_args():
     parser.add_argument("--adt", type=int, default=1, help="Adult passenger count for search requests (default: 1)")
     parser.add_argument("--chd", type=int, default=0, help="Child passenger count for search requests (default: 0)")
     parser.add_argument("--inf", type=int, default=0, help="Infant passenger count for search requests (default: 0)")
+    parser.add_argument(
+        "--trip-type",
+        default="OW",
+        help="Search trip type: OW for one-way, RT for round-trip.",
+    )
+    parser.add_argument(
+        "--return-date",
+        help="Return date for round-trip searches in YYYY-MM-DD format.",
+    )
     parser.add_argument(
         "--probe-group-id",
         help="Optional identifier to link multiple passenger-mix probe runs for the same observation window",
@@ -876,14 +886,20 @@ def _call_with_timeout(fn, timeout_seconds: float, *args, **kwargs):
 
 def _safe_call_fetch(fetch_fn, origin, dest, dt, cabin, *, timeout_seconds: float | None = None, **fetch_kwargs):
     """Call fetch_fn and guarantee unified contract back; trap exceptions."""
+    active_kwargs = dict(fetch_kwargs)
     try:
-        try:
-            resp = _call_with_timeout(fetch_fn, timeout_seconds, origin, dest, dt, cabin, **fetch_kwargs)
-        except TypeError as exc:
-            # Backward compatibility with older modules that do not accept passenger mix kwargs.
-            if fetch_kwargs and "unexpected keyword argument" in str(exc):
-                resp = _call_with_timeout(fetch_fn, timeout_seconds, origin, dest, dt, cabin)
-            else:
+        while True:
+            try:
+                resp = _call_with_timeout(fetch_fn, timeout_seconds, origin, dest, dt, cabin, **active_kwargs)
+                break
+            except TypeError as exc:
+                match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
+                if active_kwargs and match and match.group(1) in active_kwargs:
+                    active_kwargs.pop(match.group(1), None)
+                    continue
+                if active_kwargs and "unexpected keyword argument" in str(exc):
+                    resp = _call_with_timeout(fetch_fn, timeout_seconds, origin, dest, dt, cabin)
+                    break
                 raise
     except FutureTimeoutError:
         LOG.warning(
@@ -987,6 +1003,16 @@ def _raw_meta_hash_key(meta: dict) -> str:
         "chd_count": meta.get("chd_count"),
         "inf_count": meta.get("inf_count"),
         "probe_group_id": meta.get("probe_group_id"),
+        "search_trip_type": meta.get("search_trip_type"),
+        "trip_request_id": meta.get("trip_request_id"),
+        "requested_outbound_date": meta.get("requested_outbound_date"),
+        "requested_return_date": meta.get("requested_return_date"),
+        "trip_duration_days": meta.get("trip_duration_days"),
+        "trip_origin": meta.get("trip_origin"),
+        "trip_destination": meta.get("trip_destination"),
+        "leg_direction": meta.get("leg_direction"),
+        "leg_sequence": meta.get("leg_sequence"),
+        "itinerary_leg_count": meta.get("itinerary_leg_count"),
         "inventory_confidence": meta.get("inventory_confidence"),
         "departure_utc": str(meta.get("departure_utc")) if meta.get("departure_utc") is not None else None,
         "arrival_utc": str(meta.get("arrival_utc")) if meta.get("arrival_utc") is not None else None,
@@ -1098,6 +1124,17 @@ def main():
     args.adt = max(1, int(args.adt or 1))
     args.chd = max(0, int(args.chd or 0))
     args.inf = max(0, int(args.inf or 0))
+    args.trip_type = normalize_trip_type(getattr(args, "trip_type", "OW"))
+    if args.return_date and args.trip_type == "OW":
+        LOG.info("Promoting trip type to RT because --return-date was provided.")
+        args.trip_type = "RT"
+    if args.return_date:
+        try:
+            args.return_date = datetime.date.fromisoformat(str(args.return_date).strip()).isoformat()
+        except Exception:
+            raise SystemExit(f"Invalid --return-date (must be YYYY-MM-DD): {args.return_date}")
+    if args.trip_type == "RT" and not args.return_date:
+        raise SystemExit("--return-date is required when --trip-type RT")
     _apply_schedule_date_defaults_run_all(args)
     scrape_id = None
     if args.cycle_id:
@@ -1132,6 +1169,7 @@ def main():
         "accumulation_started_at_utc": now_utc.isoformat(),
         "query_timeout_seconds": float(args.query_timeout_seconds or 0),
         "search_passengers": {"adt": int(args.adt), "chd": int(args.chd), "inf": int(args.inf)},
+        "search_trip": {"trip_type": args.trip_type, "return_date": args.return_date},
         "probe_group_id": (str(args.probe_group_id).strip() if args.probe_group_id else None),
     }
     _write_run_status(run_status, latest_path=heartbeat_latest, run_path=heartbeat_run)
@@ -1202,12 +1240,19 @@ def main():
         dates = [today.isoformat()]
     if args.limit_dates and args.limit_dates > 0:
         dates = dates[: args.limit_dates]
+    if args.trip_type == "RT" and args.return_date:
+        invalid_outbounds = [value for value in dates if str(value) > str(args.return_date)]
+        if invalid_outbounds:
+            raise SystemExit(
+                f"Round-trip return date {args.return_date} is earlier than outbound date(s): {', '.join(invalid_outbounds[:5])}"
+            )
 
     if args.quick:
         LOG.info("Quick mode enabled: using single-day accumulation window.")
     LOG.info("Accumulation dates: %s", dates)
     LOG.info("Route scope: %s (market country=%s)", args.route_scope, args.market_country)
     LOG.info("Accumulation passenger mix: ADT=%d CHD=%d INF=%d", args.adt, args.chd, args.inf)
+    LOG.info("Trip search mode: %s%s", args.trip_type, f" return={args.return_date}" if args.return_date else "")
     if args.probe_group_id:
         LOG.info("Probe group id: %s", args.probe_group_id)
 
@@ -1245,6 +1290,7 @@ def main():
             "route_scope": args.route_scope,
             "market_country": args.market_country,
             "search_passengers": {"adt": int(args.adt), "chd": int(args.chd), "inf": int(args.inf)},
+            "search_trip": {"trip_type": args.trip_type, "return_date": args.return_date},
             "probe_group_id": (str(args.probe_group_id).strip() if args.probe_group_id else None),
         }
     )
@@ -1371,6 +1417,17 @@ def main():
                         cabin,
                     )
                     query_start = time.perf_counter()
+                    trip_context = build_trip_context(
+                        origin=origin,
+                        destination=dest,
+                        departure_date=dt,
+                        return_date=args.return_date,
+                        cabin=cabin,
+                        adt=args.adt,
+                        chd=args.chd,
+                        inf=args.inf,
+                        trip_type=args.trip_type,
+                    )
 
                     # 1) Primary attempt: fetch_flights if provided
                     resp = None
@@ -1382,6 +1439,9 @@ def main():
                             adt=args.adt,
                             chd=args.chd,
                             inf=args.inf,
+                            trip_type=trip_context["search_trip_type"],
+                            return_date=trip_context["requested_return_date"],
+                            trip_request_id=trip_context["trip_request_id"],
                         )
 
                     # 2) If primary failed or not provided, try legacy biman_search fallback
@@ -1400,6 +1460,8 @@ def main():
                                     adt=args.adt,
                                     chd=args.chd,
                                     inf=args.inf,
+                                    trip_type=trip_context["search_trip_type"],
+                                    return_date=trip_context["requested_return_date"],
                                 )
                                 # If result is tuple-like, try to normalize
                                 if isinstance(result, tuple) and (len(result) in (2, 3)):
@@ -1454,7 +1516,12 @@ def main():
                                 resp = {"ok": False, "raw": {}, "originalResponse": None, "rows": []}
 
                     # At this point resp exists and follows unified contract
-                    rows = resp.get("rows", [])
+                    rows = [
+                        apply_trip_context(row, trip_context)
+                        for row in resp.get("rows", [])
+                        if isinstance(row, dict)
+                    ]
+                    resp["rows"] = rows
                     elapsed = round(time.perf_counter() - query_start, 4)
                     airline_elapsed_total += elapsed
                     runtime_records.append(
@@ -1464,6 +1531,8 @@ def main():
                             "destination": dest,
                             "date": dt,
                             "cabin": cabin,
+                            "trip_type": trip_context["search_trip_type"],
+                            "return_date": trip_context["requested_return_date"],
                             "ok": bool(resp.get("ok")),
                             "rows": int(len(rows)),
                             "elapsed_sec": elapsed,
@@ -1664,6 +1733,16 @@ def main():
                                     "chd_count": r.get("chd_count"),
                                     "inf_count": r.get("inf_count"),
                                     "probe_group_id": (str(args.probe_group_id).strip() if args.probe_group_id else None),
+                                    "search_trip_type": r.get("search_trip_type"),
+                                    "trip_request_id": r.get("trip_request_id"),
+                                    "requested_outbound_date": r.get("requested_outbound_date"),
+                                    "requested_return_date": r.get("requested_return_date"),
+                                    "trip_duration_days": r.get("trip_duration_days"),
+                                    "trip_origin": r.get("trip_origin"),
+                                    "trip_destination": r.get("trip_destination"),
+                                    "leg_direction": r.get("leg_direction"),
+                                    "leg_sequence": r.get("leg_sequence"),
+                                    "itinerary_leg_count": r.get("itinerary_leg_count"),
                                     "departure_local": departure_local,
                                     "departure_utc": departure_utc,
                                     "departure_tz_offset": departure_tz_offset,

@@ -4,12 +4,12 @@ from datetime import date
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, Response
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .db import get_optional_db
-from .repositories import reporting
+from .repositories import exporting, reporting
 
 
 app = FastAPI(
@@ -120,6 +120,8 @@ def route_monitor_matrix(
     origin: list[str] | None = Query(default=None),
     destination: list[str] | None = Query(default=None),
     cabin: list[str] | None = Query(default=None),
+    trip_type: list[str] | None = Query(default=None),
+    return_date: date | None = None,
     route_limit: int = Query(default=8, ge=1, le=24),
     history_limit: int = Query(default=12, ge=1, le=48),
     db: Session | None = Depends(get_optional_db),
@@ -131,8 +133,37 @@ def route_monitor_matrix(
         origins=origin,
         destinations=destination,
         cabins=cabin,
+        trip_types=trip_type,
+        return_date=return_date,
         route_limit=route_limit,
         history_limit=history_limit,
+    )
+
+
+@app.get("/api/v1/reporting/airline-operations")
+def airline_operations(
+    cycle_id: str | None = None,
+    airline: list[str] | None = Query(default=None),
+    origin: list[str] | None = Query(default=None),
+    destination: list[str] | None = Query(default=None),
+    route_type: list[str] | None = Query(default=None),
+    start_date: date | None = None,
+    end_date: date | None = None,
+    route_limit: int = Query(default=4, ge=1, le=12),
+    trend_limit: int = Query(default=8, ge=1, le=20),
+    db: Session | None = Depends(get_optional_db),
+) -> dict:
+    return reporting.get_airline_operations(
+        db,
+        cycle_id=cycle_id,
+        airlines=airline,
+        origins=origin,
+        destinations=destination,
+        route_types=route_type,
+        start_date=start_date,
+        end_date=end_date,
+        route_limit=route_limit,
+        trend_limit=trend_limit,
     )
 
 
@@ -190,6 +221,33 @@ def change_events(
     }
 
 
+@app.get("/api/v1/reporting/change-dashboard")
+def change_dashboard(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    airline: list[str] | None = Query(default=None),
+    origin: list[str] | None = Query(default=None),
+    destination: list[str] | None = Query(default=None),
+    domain: list[str] | None = Query(default=None),
+    change_type: list[str] | None = Query(default=None),
+    direction: list[str] | None = Query(default=None),
+    top_n: int = Query(default=8, ge=1, le=20),
+    db: Session | None = Depends(get_optional_db),
+) -> dict:
+    return reporting.get_change_dashboard(
+        db,
+        start_date=start_date,
+        end_date=end_date,
+        airlines=airline,
+        origins=origin,
+        destinations=destination,
+        domains=domain,
+        change_types=change_type,
+        directions=direction,
+        top_n=top_n,
+    )
+
+
 @app.get("/api/v1/reporting/penalties")
 def penalties(
     cycle_id: str | None = None,
@@ -215,7 +273,9 @@ def taxes(
     airline: list[str] | None = Query(default=None),
     origin: list[str] | None = Query(default=None),
     destination: list[str] | None = Query(default=None),
+    route_type: list[str] | None = Query(default=None),
     limit: int = Query(default=settings.default_limit, ge=1),
+    trend_limit: int = Query(default=8, ge=1, le=20),
     db: Session | None = Depends(get_optional_db),
 ) -> dict:
     return reporting.get_taxes(
@@ -224,10 +284,60 @@ def taxes(
         airlines=airline,
         origins=origin,
         destinations=destination,
+        route_types=route_type,
         limit=_cap_limit(limit),
+        trend_limit=trend_limit,
     )
 
 
 @app.get("/api/v1/reporting/forecasting/latest")
 def forecasting_latest() -> dict:
     return reporting.get_forecasting_payload()
+
+
+@app.get("/api/v1/reporting/export.xlsx")
+def export_reporting_workbook(
+    include: list[str] | None = Query(default=None),
+    cycle_id: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    airline: list[str] | None = Query(default=None),
+    origin: list[str] | None = Query(default=None),
+    destination: list[str] | None = Query(default=None),
+    route_type: list[str] | None = Query(default=None),
+    trip_type: list[str] | None = Query(default=None),
+    return_date: date | None = None,
+    cabin: list[str] | None = Query(default=None),
+    domain: list[str] | None = Query(default=None),
+    change_type: list[str] | None = Query(default=None),
+    direction: list[str] | None = Query(default=None),
+    route_limit: int = Query(default=8, ge=1, le=24),
+    history_limit: int = Query(default=12, ge=1, le=48),
+    limit: int = Query(default=settings.default_limit, ge=1),
+    db: Session | None = Depends(get_optional_db),
+) -> StreamingResponse:
+    payload, filename = exporting.build_reporting_workbook(
+        db,
+        sections=include or (),
+        cycle_id=cycle_id,
+        airlines=airline,
+        origins=origin,
+        destinations=destination,
+        route_types=route_type,
+        trip_types=trip_type,
+        return_date=return_date,
+        cabins=cabin,
+        start_date=start_date,
+        end_date=end_date,
+        domains=domain,
+        change_types=change_type,
+        directions=direction,
+        route_limit=route_limit,
+        history_limit=history_limit,
+        limit=_cap_limit(limit),
+    )
+    return StreamingResponse(
+        iter([payload]),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

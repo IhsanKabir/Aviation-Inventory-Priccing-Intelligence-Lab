@@ -1,8 +1,9 @@
 import { LiveFilterControls } from "@/components/live-filter-controls";
 import { DataPanel } from "@/components/data-panel";
 import { MetricCard } from "@/components/metric-card";
-import { getAirlines, getPenaltyPayload, getRoutes } from "@/lib/api";
-import { formatBooleanFlag, formatDhakaDateTime, formatMoney, normalizeLongText, shortCycle, summarizePenaltyText } from "@/lib/format";
+import { getAirlines, getPenaltyPayload, getRecentCycles, getRoutes } from "@/lib/api";
+import { buildReportingExportUrl } from "@/lib/export";
+import { formatBooleanFlag, formatDhakaDateTime, formatMoney, formatRouteGeo, formatRouteType, normalizeLongText, shortCycle, summarizePenaltyText } from "@/lib/format";
 import { firstParam, manyParams, parseLimit, type RawSearchParams } from "@/lib/query";
 
 type PageProps = {
@@ -25,9 +26,10 @@ export default async function PenaltiesPage({ searchParams }: PageProps) {
   const limit = parseLimit(firstParam(params, "limit"), 120);
   const routeKey = selectedRouteKey(origin, destination);
 
-  const [airlines, routes, penalties] = await Promise.all([
+  const [airlines, routes, recentCycles, penalties] = await Promise.all([
     getAirlines(),
     getRoutes(),
+    getRecentCycles(8),
     getPenaltyPayload({
       cycleId,
       airlines: selectedAirlines,
@@ -46,10 +48,17 @@ export default async function PenaltiesPage({ searchParams }: PageProps) {
     .sort((left, right) => (right.offer_rows ?? 0) - (left.offer_rows ?? 0) || left.route_key.localeCompare(right.route_key))
     .slice(0, 16)
     .map((item) => ({ routeKey: item.route_key, origin: item.origin, destination: item.destination }));
+  const cycleOptions = (recentCycles.data?.items ?? [])
+    .filter((item) => item.cycle_id)
+    .map((item) => ({
+      label: `${shortCycle(item.cycle_id)}${item.cycle_completed_at_utc ? ` · ${formatDhakaDateTime(item.cycle_completed_at_utc)}` : ""}`,
+      value: item.cycle_id as string
+    }));
 
   const airlineCount = new Set(rows.map((row) => row.airline)).size;
   const routeCount = new Set(rows.map((row) => row.route_key)).size;
   const refundableCount = rows.filter((row) => row.fare_refundable).length;
+  const exportHref = buildReportingExportUrl(params, ["penalties"]);
 
   return (
     <>
@@ -77,7 +86,20 @@ export default async function PenaltiesPage({ searchParams }: PageProps) {
         >
           <LiveFilterControls
             airlineOptions={airlineOptions}
-            clearKeys={["airline", "origin", "destination", "limit"]}
+            clearKeys={["airline", "origin", "destination", "cycle_id", "limit"]}
+            extraGroups={
+              cycleOptions.length
+                ? [
+                    {
+                      key: "cycle_id",
+                      label: "Recent cycles",
+                      selected: cycleId ? [cycleId] : [],
+                      options: cycleOptions,
+                      multi: false
+                    }
+                  ]
+                : []
+            }
             initialValues={{
               origin: origin ?? "",
               destination: destination ?? "",
@@ -92,6 +114,12 @@ export default async function PenaltiesPage({ searchParams }: PageProps) {
             selectedAirlines={selectedAirlines}
             selectedRouteKey={routeKey}
           />
+
+          <div className="button-row">
+            <a className="button-link ghost" href={exportHref}>
+              Download Excel
+            </a>
+          </div>
         </DataPanel>
 
         <DataPanel
@@ -122,7 +150,17 @@ export default async function PenaltiesPage({ searchParams }: PageProps) {
                     <tr
                       key={`${row.route_key}-${row.airline}-${row.flight_number}-${row.departure_utc}-${row.fare_basis ?? ""}-${row.captured_at_utc ?? ""}-${index}`}
                     >
-                      <td>{row.route_key}</td>
+                      <td>
+                        <div className="table-cell-stack">
+                          <strong>{row.route_key}</strong>
+                          <span className="route-inline-meta">
+                            <span className="route-type-pill" data-type={formatRouteType(row.route_type)}>
+                              {formatRouteType(row.route_type)}
+                            </span>
+                            <span>{formatRouteGeo(row.origin_country_code, row.destination_country_code)}</span>
+                          </span>
+                        </div>
+                      </td>
                       <td>{row.airline}</td>
                       <td>{row.flight_number}</td>
                       <td>{formatDhakaDateTime(row.departure_utc)}</td>

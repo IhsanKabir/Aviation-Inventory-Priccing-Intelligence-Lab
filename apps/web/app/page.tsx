@@ -1,6 +1,7 @@
 import { DataPanel } from "@/components/data-panel";
 import { MetricCard } from "@/components/metric-card";
 import { getApiBaseUrl, getDashboardPayload } from "@/lib/api";
+import { formatRouteGeo, formatRouteType } from "@/lib/format";
 
 function formatDate(value?: string | null) {
   if (!value) return "Not available";
@@ -134,8 +135,11 @@ export default async function HomePage() {
               <div className="table-row" key={item.route_key}>
                 <div>
                   <strong>{item.route_key}</strong>
-                  <span>
-                    {item.origin} {"->"} {item.destination}
+                  <span className="route-inline-meta">
+                    <span className="route-type-pill" data-type={formatRouteType(item.route_type)}>
+                      {formatRouteType(item.route_type)}
+                    </span>
+                    <span>{formatRouteGeo(item.origin_country_code, item.destination_country_code)}</span>
                   </span>
                 </div>
                 <div className="pill good">

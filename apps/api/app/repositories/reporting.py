@@ -20,6 +20,7 @@ from ..config import settings
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 ROUTES_CONFIG_PATH = REPO_ROOT / "config" / "routes.json"
+AIRPORT_COUNTRIES_CONFIG_PATH = REPO_ROOT / "config" / "airport_countries.json"
 RUN_STATUS_LATEST_PATH = REPO_ROOT / "output" / "reports" / "run_all_status_latest.json"
 REPORTS_ROOT = REPO_ROOT / "output" / "reports"
 PREDICTION_EVAL_RE = re.compile(r"^prediction_eval_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
@@ -27,6 +28,18 @@ PREDICTION_NEXT_RE = re.compile(r"^prediction_next_day_(?P<target>.+)_(?P<stamp>
 PREDICTION_ROUTE_EVAL_RE = re.compile(r"^prediction_eval_by_route_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
 PREDICTION_BACKTEST_META_RE = re.compile(r"^prediction_backtest_meta_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.json$")
 PREDICTION_BACKTEST_EVAL_RE = re.compile(r"^prediction_backtest_eval_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
+ROUTE_TYPE_DOM = "DOM"
+ROUTE_TYPE_INT = "INT"
+ROUTE_TYPE_UNK = "UNK"
+WEEKDAY_ORDER = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+]
 
 
 def _normalize_codes(values: Sequence[str] | None, uppercase: bool = True) -> list[str]:
@@ -70,6 +83,223 @@ def _rows_to_dicts(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
             clean[key] = float(value) if isinstance(value, Decimal) else value
         payload.append(clean)
     return payload
+
+
+@lru_cache(maxsize=1)
+def _load_airport_country_map() -> dict[str, str]:
+    try:
+        payload = json.loads(AIRPORT_COUNTRIES_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+    mapping: dict[str, str] = {}
+    if not isinstance(payload, dict):
+        return mapping
+
+    for airport_code, country_code in payload.items():
+        normalized_airport = str(airport_code or "").strip().upper()
+        normalized_country = str(country_code or "").strip().upper()
+        if normalized_airport and normalized_country:
+            mapping[normalized_airport] = normalized_country
+    return mapping
+
+
+def _classify_route(origin: Any, destination: Any) -> dict[str, Any]:
+    origin_code = str(origin or "").strip().upper()
+    destination_code = str(destination or "").strip().upper()
+    country_map = _load_airport_country_map()
+    origin_country = country_map.get(origin_code)
+    destination_country = country_map.get(destination_code)
+
+    route_type = ROUTE_TYPE_UNK
+    is_cross_border = False
+    domestic_country_code: str | None = None
+    if origin_country and destination_country:
+        if origin_country == destination_country:
+            route_type = ROUTE_TYPE_DOM
+            domestic_country_code = origin_country
+        else:
+            route_type = ROUTE_TYPE_INT
+            is_cross_border = True
+
+    country_pair = f"{origin_country}-{destination_country}" if origin_country and destination_country else None
+    return {
+        "origin_country_code": origin_country,
+        "destination_country_code": destination_country,
+        "country_pair": country_pair,
+        "route_type": route_type,
+        "domestic_country_code": domestic_country_code,
+        "is_cross_border": is_cross_border,
+    }
+
+
+def _annotate_route_record(row: dict[str, Any]) -> dict[str, Any]:
+    annotated = dict(row)
+    annotated.update(_classify_route(annotated.get("origin"), annotated.get("destination")))
+    return annotated
+
+
+def _annotate_route_records(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [_annotate_route_record(row) for row in rows]
+
+
+def _normalize_route_types(values: Sequence[str] | None) -> list[str]:
+    normalized = _normalize_codes(values)
+    return [value for value in normalized if value in {ROUTE_TYPE_DOM, ROUTE_TYPE_INT, ROUTE_TYPE_UNK}]
+
+
+def _filter_route_type_records(rows: Sequence[dict[str, Any]], route_types: Sequence[str] | None) -> list[dict[str, Any]]:
+    normalized = set(_normalize_route_types(route_types))
+    if not normalized:
+        return list(rows)
+    return [row for row in rows if str(row.get("route_type") or ROUTE_TYPE_UNK) in normalized]
+
+
+def _time_sort_key(value: Any) -> tuple[int, str]:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return (1, "99:99")
+    return (0, cleaned)
+
+
+def _weekday_sort_key(label: str) -> tuple[int, str]:
+    try:
+        return (WEEKDAY_ORDER.index(label), label)
+    except ValueError:
+        return (len(WEEKDAY_ORDER), label)
+
+
+def _display_change_field_name(value: Any) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return "-"
+    explicit_labels = {
+        "tax_amount": "Tax amount",
+        "total_price_bdt": "Total price",
+        "base_fare_amount": "Base fare",
+        "ota_gross_fare": "Channel gross fare",
+        "ota_discount_amount": "Channel discount amount",
+        "ota_discount_pct": "Channel discount percent",
+        "seat_available": "Seat available",
+        "seat_capacity": "Seat capacity",
+        "load_factor_pct": "Load factor",
+        "booking_class": "Booking class",
+        "penalty_rule_text": "Penalty text",
+        "operating_airline": "Operating airline",
+    }
+    if normalized in explicit_labels:
+        return explicit_labels[normalized]
+    return " ".join(token.capitalize() for token in normalized.split("_") if token)
+
+
+def _build_change_bigquery_filter_state(
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    airlines: Sequence[str] | None = None,
+    origins: Sequence[str] | None = None,
+    destinations: Sequence[str] | None = None,
+    domains: Sequence[str] | None = None,
+    change_types: Sequence[str] | None = None,
+    directions: Sequence[str] | None = None,
+) -> tuple[list[str], list[bigquery.ScalarQueryParameter]]:
+    filters = ["1=1"]
+    params: list[bigquery.ScalarQueryParameter] = []
+    if start_date:
+        filters.append("report_day >= @start_date")
+        params.append(bigquery.ScalarQueryParameter("start_date", "DATE", start_date))
+    if end_date:
+        filters.append("report_day <= @end_date")
+        params.append(bigquery.ScalarQueryParameter("end_date", "DATE", end_date))
+    if airlines:
+        filters.append("airline IN UNNEST(@airlines)")
+        params.append(bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines)))
+    if origins:
+        filters.append("origin IN UNNEST(@origins)")
+        params.append(bigquery.ArrayQueryParameter("origins", "STRING", _normalize_codes(origins)))
+    if destinations:
+        filters.append("destination IN UNNEST(@destinations)")
+        params.append(bigquery.ArrayQueryParameter("destinations", "STRING", _normalize_codes(destinations)))
+    if domains:
+        filters.append("domain IN UNNEST(@domains)")
+        params.append(bigquery.ArrayQueryParameter("domains", "STRING", _normalize_codes(domains, uppercase=False)))
+    if change_types:
+        filters.append("change_type IN UNNEST(@change_types)")
+        params.append(bigquery.ArrayQueryParameter("change_types", "STRING", _normalize_codes(change_types, uppercase=False)))
+    if directions:
+        filters.append("direction IN UNNEST(@directions)")
+        params.append(bigquery.ArrayQueryParameter("directions", "STRING", _normalize_codes(directions, uppercase=False)))
+    return filters, params
+
+
+def _build_change_sql_filter_state(
+    *,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    airlines: Sequence[str] | None = None,
+    origins: Sequence[str] | None = None,
+    destinations: Sequence[str] | None = None,
+    domains: Sequence[str] | None = None,
+    change_types: Sequence[str] | None = None,
+    directions: Sequence[str] | None = None,
+    alias: str = "cce",
+) -> tuple[list[str], dict[str, Any]]:
+    clauses = ["1=1"]
+    params: dict[str, Any] = {}
+    if start_date:
+        clauses.append(f"{alias}.detected_at::date >= :start_date")
+        params["start_date"] = start_date
+    if end_date:
+        clauses.append(f"{alias}.detected_at::date <= :end_date")
+        params["end_date"] = end_date
+    _apply_in_filter(clauses, params, f"{alias}.airline", airlines, "airline")
+    _apply_in_filter(clauses, params, f"{alias}.origin", origins, "origin")
+    _apply_in_filter(clauses, params, f"{alias}.destination", destinations, "destination")
+    _apply_in_filter(clauses, params, f"{alias}.domain", domains, "domain", uppercase=False)
+    _apply_in_filter(clauses, params, f"{alias}.change_type", change_types, "change_type", uppercase=False)
+    _apply_in_filter(clauses, params, f"{alias}.direction", directions, "direction", uppercase=False)
+    return clauses, params
+
+
+def _build_change_dashboard_payload(
+    *,
+    summary_row: dict[str, Any] | None,
+    daily_rows: Sequence[dict[str, Any]],
+    route_rows: Sequence[dict[str, Any]],
+    airline_rows: Sequence[dict[str, Any]],
+    domain_rows: Sequence[dict[str, Any]],
+    field_rows: Sequence[dict[str, Any]],
+    largest_moves: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    summary = dict(summary_row or {})
+    summary.setdefault("event_count", 0)
+    summary.setdefault("route_count", 0)
+    summary.setdefault("airline_count", 0)
+    summary.setdefault("up_count", 0)
+    summary.setdefault("down_count", 0)
+    summary.setdefault("added_count", 0)
+    summary.setdefault("removed_count", 0)
+    summary.setdefault("price_event_count", 0)
+    summary.setdefault("availability_event_count", 0)
+    summary.setdefault("schedule_event_count", 0)
+    summary.setdefault("tax_event_count", 0)
+    summary.setdefault("penalty_event_count", 0)
+
+    field_mix = []
+    for row in field_rows:
+        normalized = dict(row)
+        normalized["display_name"] = _display_change_field_name(normalized.get("field_name"))
+        field_mix.append(normalized)
+
+    return {
+        "summary": summary,
+        "daily_series": list(daily_rows),
+        "top_routes": _annotate_route_records(route_rows),
+        "top_airlines": list(airline_rows),
+        "domain_mix": list(domain_rows),
+        "field_mix": field_mix,
+        "largest_moves": _annotate_route_records(largest_moves),
+    }
 
 
 def _get_latest_cycle_from_bigquery() -> dict[str, Any] | None:
@@ -833,7 +1063,7 @@ def list_routes(session: Session | None) -> list[dict[str, Any]]:
                 ORDER BY origin, destination
                 """
             )
-            return _serialize_warehouse_rows(rows)
+            return _annotate_route_records(_serialize_warehouse_rows(rows))
         except (GoogleAPIError, RuntimeError, ValueError):
             pass
     if session is None:
@@ -855,7 +1085,7 @@ def list_routes(session: Session | None) -> list[dict[str, Any]]:
             """
         )
     ).mappings().all()
-    return _rows_to_dicts([dict(row) for row in rows])
+    return _annotate_route_records(_rows_to_dicts([dict(row) for row in rows]))
 
 
 def _resolve_cycle_id(session: Session, cycle_id: str | None) -> str | None:
@@ -925,7 +1155,7 @@ def get_current_snapshot(
         params,
     ).mappings().all()
 
-    return {"cycle_id": resolved_cycle_id, "rows": _rows_to_dicts([dict(row) for row in rows])}
+    return {"cycle_id": resolved_cycle_id, "rows": _annotate_route_records(_rows_to_dicts([dict(row) for row in rows]))}
 
 
 def _departure_day_label(value: date | datetime | str | None) -> str:
@@ -953,6 +1183,7 @@ def _build_route_monitor_matrix_from_aggregates(
 
     route_date_map: dict[str, set[str]] = defaultdict(set)
     flight_groups_by_route: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    route_trip_meta: dict[str, dict[str, Any]] = {}
     for row in current_rows:
         route_key = str(row["route_key"])
         dep_date_iso = _iso_date(row.get("departure_date"))
@@ -961,6 +1192,17 @@ def _build_route_monitor_matrix_from_aggregates(
         route_date_map[route_key].add(dep_date_iso)
         normalized_row = dict(row)
         normalized_row["departure_date"] = dep_date_iso
+        if route_key not in route_trip_meta:
+            route_trip_meta[route_key] = {
+                "search_trip_type": normalized_row.get("search_trip_type"),
+                "trip_pair_key": normalized_row.get("trip_pair_key"),
+                "trip_request_id": normalized_row.get("trip_request_id"),
+                "requested_outbound_date": normalized_row.get("requested_outbound_date"),
+                "requested_return_date": normalized_row.get("requested_return_date"),
+                "trip_duration_days": normalized_row.get("trip_duration_days"),
+                "trip_origin": normalized_row.get("trip_origin"),
+                "trip_destination": normalized_row.get("trip_destination"),
+            }
         flight_group_id = _matrix_flight_group_id(normalized_row)
         if flight_group_id not in flight_groups_by_route[route_key]:
             flight_groups_by_route[route_key][flight_group_id] = {
@@ -970,6 +1212,12 @@ def _build_route_monitor_matrix_from_aggregates(
                 "departure_time": normalized_row.get("departure_time"),
                 "cabin": normalized_row.get("cabin"),
                 "aircraft": normalized_row.get("aircraft"),
+                "search_trip_type": normalized_row.get("search_trip_type"),
+                "trip_request_id": normalized_row.get("trip_request_id"),
+                "requested_return_date": normalized_row.get("requested_return_date"),
+                "leg_direction": normalized_row.get("leg_direction"),
+                "leg_sequence": normalized_row.get("leg_sequence"),
+                "itinerary_leg_count": normalized_row.get("itinerary_leg_count"),
             }
 
     grouped_cell_history: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -999,8 +1247,8 @@ def _build_route_monitor_matrix_from_aggregates(
         flight_groups = sorted(
             flight_groups_by_route.get(route_key, {}).values(),
             key=lambda item: (
-                str(item.get("airline") or ""),
                 str(item.get("departure_time") or ""),
+                str(item.get("airline") or ""),
                 str(item.get("flight_number") or ""),
             ),
         )
@@ -1064,6 +1312,8 @@ def _build_route_monitor_matrix_from_aggregates(
                 "route_key": route_key,
                 "origin": route_row.get("origin"),
                 "destination": route_row.get("destination"),
+                **_classify_route(route_row.get("origin"), route_row.get("destination")),
+                **route_trip_meta.get(route_key, {}),
                 "flight_groups": flight_groups,
                 "date_groups": date_groups,
             }
@@ -1095,6 +1345,8 @@ def _get_route_monitor_matrix_from_bigquery(
     origins: Sequence[str] | None = None,
     destinations: Sequence[str] | None = None,
     cabins: Sequence[str] | None = None,
+    trip_types: Sequence[str] | None = None,
+    return_date: date | None = None,
     route_limit: int = 8,
     history_limit: int = 12,
 ) -> dict[str, Any]:
@@ -1119,6 +1371,20 @@ def _get_route_monitor_matrix_from_bigquery(
     if cabins:
         route_filters.append("cabin IN UNNEST(@cabins)")
         route_params.append(bigquery.ArrayQueryParameter("cabins", "STRING", _normalize_codes(cabins, uppercase=False)))
+    normalized_trip_types = [value for value in _normalize_codes(trip_types) if value in {"OW", "RT"}]
+    if normalized_trip_types:
+        route_filters.append("search_trip_type IN UNNEST(@trip_types)")
+        route_params.append(bigquery.ArrayQueryParameter("trip_types", "STRING", normalized_trip_types))
+    if return_date:
+        route_filters.append("requested_return_date = @return_date")
+        route_params.append(bigquery.ScalarQueryParameter("return_date", "DATE", return_date))
+    if normalized_trip_types:
+        if origins:
+            route_filters.append("trip_origin IN UNNEST(@trip_origins)")
+            route_params.append(bigquery.ArrayQueryParameter("trip_origins", "STRING", _normalize_codes(origins)))
+        if destinations:
+            route_filters.append("trip_destination IN UNNEST(@trip_destinations)")
+            route_params.append(bigquery.ArrayQueryParameter("trip_destinations", "STRING", _normalize_codes(destinations)))
 
     selected_routes = _serialize_warehouse_rows(
         _run_bigquery_query(
@@ -1152,6 +1418,12 @@ def _get_route_monitor_matrix_from_bigquery(
     if cabins:
         current_filters.append("cabin IN UNNEST(@cabins)")
         current_params.append(bigquery.ArrayQueryParameter("cabins", "STRING", _normalize_codes(cabins, uppercase=False)))
+    if normalized_trip_types:
+        current_filters.append("search_trip_type IN UNNEST(@trip_types)")
+        current_params.append(bigquery.ArrayQueryParameter("trip_types", "STRING", normalized_trip_types))
+    if return_date:
+        current_filters.append("requested_return_date = @return_date")
+        current_params.append(bigquery.ScalarQueryParameter("return_date", "DATE", return_date))
 
     current_rows = _serialize_warehouse_rows(
         _run_bigquery_query(
@@ -1169,6 +1441,17 @@ def _get_route_monitor_matrix_from_bigquery(
               FORMAT_TIMESTAMP('%H:%M', departure_utc) AS departure_time,
               cabin,
               COALESCE(aircraft, '') AS aircraft,
+              search_trip_type,
+              trip_request_id,
+              requested_outbound_date,
+              requested_return_date,
+              trip_duration_days,
+              trip_origin,
+              trip_destination,
+              trip_pair_key,
+              leg_direction,
+              leg_sequence,
+              itinerary_leg_count,
               MIN(total_price_bdt) AS min_total_price_bdt,
               MAX(total_price_bdt) AS max_total_price_bdt,
               MAX(tax_amount) AS tax_amount,
@@ -1180,7 +1463,10 @@ def _get_route_monitor_matrix_from_bigquery(
             WHERE {' AND '.join(current_filters)}
             GROUP BY
               cycle_id, captured_at_utc, airline, origin, destination, route_key,
-              flight_number, departure_utc, departure_date, departure_time, cabin, aircraft
+              flight_number, departure_utc, departure_date, departure_time, cabin, aircraft,
+              search_trip_type, trip_request_id, requested_outbound_date, requested_return_date,
+              trip_duration_days, trip_origin, trip_destination, trip_pair_key, leg_direction,
+              leg_sequence, itinerary_leg_count
             ORDER BY route_key, departure_date, departure_time, airline, flight_number
             """,
             current_params,
@@ -1209,6 +1495,12 @@ def _get_route_monitor_matrix_from_bigquery(
     if cabins:
         history_filters.append("cabin IN UNNEST(@cabins)")
         history_params.append(bigquery.ArrayQueryParameter("cabins", "STRING", _normalize_codes(cabins, uppercase=False)))
+    if normalized_trip_types:
+        history_filters.append("search_trip_type IN UNNEST(@trip_types)")
+        history_params.append(bigquery.ArrayQueryParameter("trip_types", "STRING", normalized_trip_types))
+    if return_date:
+        history_filters.append("requested_return_date = @return_date")
+        history_params.append(bigquery.ScalarQueryParameter("return_date", "DATE", return_date))
 
     history_rows = _serialize_warehouse_rows(
         _run_bigquery_query(
@@ -1226,6 +1518,17 @@ def _get_route_monitor_matrix_from_bigquery(
               FORMAT_TIMESTAMP('%H:%M', departure_utc) AS departure_time,
               cabin,
               COALESCE(aircraft, '') AS aircraft,
+              search_trip_type,
+              trip_request_id,
+              requested_outbound_date,
+              requested_return_date,
+              trip_duration_days,
+              trip_origin,
+              trip_destination,
+              trip_pair_key,
+              leg_direction,
+              leg_sequence,
+              itinerary_leg_count,
               MIN(total_price_bdt) AS min_total_price_bdt,
               MAX(total_price_bdt) AS max_total_price_bdt,
               MAX(tax_amount) AS tax_amount,
@@ -1237,7 +1540,10 @@ def _get_route_monitor_matrix_from_bigquery(
             WHERE {' AND '.join(history_filters)}
             GROUP BY
               cycle_id, captured_at_utc, airline, origin, destination, route_key,
-              flight_number, departure_utc, departure_date, departure_time, cabin, aircraft
+              flight_number, departure_utc, departure_date, departure_time, cabin, aircraft,
+              search_trip_type, trip_request_id, requested_outbound_date, requested_return_date,
+              trip_duration_days, trip_origin, trip_destination, trip_pair_key, leg_direction,
+              leg_sequence, itinerary_leg_count
             ORDER BY captured_at_utc DESC, route_key, departure_date, departure_time, airline, flight_number
             """,
             history_params,
@@ -1257,6 +1563,9 @@ def _matrix_flight_group_id(row: dict[str, Any]) -> str:
     departure_time = str(row.get("departure_time") or "").strip()
     aircraft = str(row.get("aircraft") or "").strip().upper()
     cabin = str(row.get("cabin") or "").strip()
+    search_trip_type = str(row.get("search_trip_type") or "OW").strip().upper()
+    requested_return_date = str(row.get("requested_return_date") or "").strip()
+    leg_direction = str(row.get("leg_direction") or "").strip().lower()
     return "|".join(
         [
             str(row.get("route_key") or ""),
@@ -1265,6 +1574,9 @@ def _matrix_flight_group_id(row: dict[str, Any]) -> str:
             departure_time,
             cabin,
             aircraft,
+            search_trip_type,
+            requested_return_date,
+            leg_direction,
         ]
     )
 
@@ -1308,9 +1620,12 @@ def get_route_monitor_matrix(
     origins: Sequence[str] | None = None,
     destinations: Sequence[str] | None = None,
     cabins: Sequence[str] | None = None,
+    trip_types: Sequence[str] | None = None,
+    return_date: date | None = None,
     route_limit: int = 8,
     history_limit: int = 12,
 ) -> dict[str, Any]:
+    normalized_trip_types = [value for value in _normalize_codes(trip_types) if value in {"OW", "RT"}]
     if _bigquery_ready():
         try:
             return _get_route_monitor_matrix_from_bigquery(
@@ -1319,11 +1634,15 @@ def get_route_monitor_matrix(
                 origins=origins,
                 destinations=destinations,
                 cabins=cabins,
+                trip_types=normalized_trip_types,
+                return_date=return_date,
                 route_limit=route_limit,
                 history_limit=history_limit,
             )
         except (GoogleAPIError, RuntimeError, ValueError):
             pass
+    if session is None:
+        return {"cycle_id": None, "routes": []}
 
     resolved_cycle_id = _resolve_cycle_id(session, cycle_id)
     if not resolved_cycle_id:
@@ -1332,9 +1651,18 @@ def get_route_monitor_matrix(
     route_clauses = ["fo.scrape_id = CAST(:cycle_id AS uuid)"]
     route_params: dict[str, Any] = {"cycle_id": resolved_cycle_id, "route_limit": route_limit}
     _apply_in_filter(route_clauses, route_params, "fo.airline", airlines, "route_airline")
-    _apply_in_filter(route_clauses, route_params, "fo.origin", origins, "route_origin")
-    _apply_in_filter(route_clauses, route_params, "fo.destination", destinations, "route_destination")
     _apply_in_filter(route_clauses, route_params, "fo.cabin", cabins, "route_cabin", uppercase=False)
+    if normalized_trip_types:
+        _apply_in_filter(route_clauses, route_params, "COALESCE(frm.search_trip_type, 'OW')", normalized_trip_types, "route_trip_type")
+    if return_date:
+        route_clauses.append("frm.requested_return_date = :route_return_date")
+        route_params["route_return_date"] = return_date.isoformat()
+    if normalized_trip_types:
+        _apply_in_filter(route_clauses, route_params, "COALESCE(frm.trip_origin, fo.origin)", origins, "route_trip_origin")
+        _apply_in_filter(route_clauses, route_params, "COALESCE(frm.trip_destination, fo.destination)", destinations, "route_trip_destination")
+    else:
+        _apply_in_filter(route_clauses, route_params, "fo.origin", origins, "route_origin")
+        _apply_in_filter(route_clauses, route_params, "fo.destination", destinations, "route_destination")
 
     route_rows = session.execute(
         text(
@@ -1345,6 +1673,8 @@ def get_route_monitor_matrix(
                 (fo.origin || '-' || fo.destination) AS route_key,
                 COUNT(*) AS row_count
             FROM flight_offers fo
+            LEFT JOIN flight_offer_raw_meta frm
+              ON frm.flight_offer_id = fo.id
             WHERE {' AND '.join(route_clauses)}
             GROUP BY fo.origin, fo.destination
             ORDER BY row_count DESC, route_key
@@ -1366,6 +1696,11 @@ def get_route_monitor_matrix(
     _apply_in_filter(current_clauses, current_params, "(fo.origin || '-' || fo.destination)", route_keys, "matrix_route", uppercase=True)
     _apply_in_filter(current_clauses, current_params, "fo.airline", airlines, "matrix_airline")
     _apply_in_filter(current_clauses, current_params, "fo.cabin", cabins, "matrix_cabin", uppercase=False)
+    if normalized_trip_types:
+        _apply_in_filter(current_clauses, current_params, "COALESCE(frm.search_trip_type, 'OW')", normalized_trip_types, "matrix_trip_type")
+    if return_date:
+        current_clauses.append("frm.requested_return_date = :matrix_return_date")
+        current_params["matrix_return_date"] = return_date.isoformat()
 
     current_rows = session.execute(
         text(
@@ -1383,6 +1718,17 @@ def get_route_monitor_matrix(
                 TO_CHAR(fo.departure, 'HH24:MI') AS departure_time,
                 fo.cabin,
                 COALESCE(frm.aircraft, '') AS aircraft,
+                COALESCE(frm.search_trip_type, 'OW') AS search_trip_type,
+                frm.trip_request_id,
+                frm.requested_outbound_date,
+                frm.requested_return_date,
+                frm.trip_duration_days,
+                COALESCE(frm.trip_origin, fo.origin) AS trip_origin,
+                COALESCE(frm.trip_destination, fo.destination) AS trip_destination,
+                COALESCE(frm.trip_origin, fo.origin) || '-' || COALESCE(frm.trip_destination, fo.destination) AS trip_pair_key,
+                COALESCE(frm.leg_direction, 'outbound') AS leg_direction,
+                frm.leg_sequence,
+                frm.itinerary_leg_count,
                 CAST(MIN(fo.price_total_bdt) AS NUMERIC(12, 2)) AS min_total_price_bdt,
                 CAST(MAX(fo.price_total_bdt) AS NUMERIC(12, 2)) AS max_total_price_bdt,
                 CAST(MAX(frm.tax_amount) AS NUMERIC(12, 2)) AS tax_amount,
@@ -1430,6 +1776,11 @@ def get_route_monitor_matrix(
     _apply_in_filter(history_clauses, history_params, "(fo.origin || '-' || fo.destination)", route_keys, "history_route", uppercase=True)
     _apply_in_filter(history_clauses, history_params, "fo.airline", airlines, "history_airline")
     _apply_in_filter(history_clauses, history_params, "fo.cabin", cabins, "history_cabin", uppercase=False)
+    if normalized_trip_types:
+        _apply_in_filter(history_clauses, history_params, "COALESCE(frm.search_trip_type, 'OW')", normalized_trip_types, "history_trip_type")
+    if return_date:
+        history_clauses.append("frm.requested_return_date = :history_return_date")
+        history_params["history_return_date"] = return_date.isoformat()
 
     history_rows = session.execute(
         text(
@@ -1447,6 +1798,17 @@ def get_route_monitor_matrix(
                 TO_CHAR(fo.departure, 'HH24:MI') AS departure_time,
                 fo.cabin,
                 COALESCE(frm.aircraft, '') AS aircraft,
+                COALESCE(frm.search_trip_type, 'OW') AS search_trip_type,
+                frm.trip_request_id,
+                frm.requested_outbound_date,
+                frm.requested_return_date,
+                frm.trip_duration_days,
+                COALESCE(frm.trip_origin, fo.origin) AS trip_origin,
+                COALESCE(frm.trip_destination, fo.destination) AS trip_destination,
+                COALESCE(frm.trip_origin, fo.origin) || '-' || COALESCE(frm.trip_destination, fo.destination) AS trip_pair_key,
+                COALESCE(frm.leg_direction, 'outbound') AS leg_direction,
+                frm.leg_sequence,
+                frm.itinerary_leg_count,
                 CAST(MIN(fo.price_total_bdt) AS NUMERIC(12, 2)) AS min_total_price_bdt,
                 CAST(MAX(fo.price_total_bdt) AS NUMERIC(12, 2)) AS max_total_price_bdt,
                 CAST(MAX(frm.tax_amount) AS NUMERIC(12, 2)) AS tax_amount,
@@ -1481,6 +1843,657 @@ def get_route_monitor_matrix(
         current_rows=current_dicts,
         history_rows=history_dicts,
         history_limit=history_limit,
+    )
+
+
+def _build_airline_operations_payload(
+    *,
+    resolved_cycle_id: str,
+    selected_routes: Sequence[dict[str, Any]],
+    current_rows: Sequence[dict[str, Any]],
+    trend_route_rows: Sequence[dict[str, Any]],
+    trend_airline_rows: Sequence[dict[str, Any]],
+    recent_cycles: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    if not selected_routes:
+        return {"cycle_id": resolved_cycle_id, "routes": []}
+
+    current_by_route: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in current_rows:
+        current_by_route[str(row.get("route_key") or "")].append(dict(row))
+
+    trend_route_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in trend_route_rows:
+        trend_route_by_key[str(row.get("route_key") or "")].append(dict(row))
+
+    trend_airline_by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in trend_airline_rows:
+        trend_airline_by_key[(str(row.get("route_key") or ""), str(row.get("airline") or ""))].append(dict(row))
+
+    cycle_lookup = {
+        str(item.get("cycle_id") or ""): item
+        for item in recent_cycles
+        if item.get("cycle_id")
+    }
+
+    route_payloads: list[dict[str, Any]] = []
+    for route in selected_routes:
+        route_key = str(route.get("route_key") or "")
+        route_rows = sorted(
+            current_by_route.get(route_key, []),
+            key=lambda row: (
+                _iso_date(row.get("departure_date")),
+                _time_sort_key(row.get("departure_time")),
+                str(row.get("airline") or ""),
+                str(row.get("flight_number") or ""),
+            ),
+        )
+
+        weekday_map: dict[str, dict[str, Any]] = {}
+        departure_days_map: dict[str, dict[str, Any]] = {}
+        airline_map: dict[str, dict[str, Any]] = {}
+        for row in route_rows:
+            dep_date = _iso_date(row.get("departure_date"))
+            dep_time = str(row.get("departure_time") or "").strip()
+            airline = str(row.get("airline") or "").strip()
+            flight_number = str(row.get("flight_number") or "").strip()
+            day_label = _departure_day_label(dep_date)
+
+            departure_day = departure_days_map.setdefault(
+                dep_date,
+                {
+                    "departure_date": dep_date,
+                    "day_label": day_label,
+                    "flight_instance_count": 0,
+                    "airlines": set(),
+                    "departure_times": set(),
+                },
+            )
+            departure_day["flight_instance_count"] += 1
+            if airline:
+                departure_day["airlines"].add(airline)
+            if dep_time:
+                departure_day["departure_times"].add(dep_time)
+
+            weekday = weekday_map.setdefault(
+                day_label,
+                {
+                    "day_label": day_label,
+                    "flight_instance_count": 0,
+                    "active_dates": set(),
+                    "airlines": set(),
+                },
+            )
+            weekday["flight_instance_count"] += 1
+            if dep_date:
+                weekday["active_dates"].add(dep_date)
+            if airline:
+                weekday["airlines"].add(airline)
+
+            airline_entry = airline_map.setdefault(
+                airline,
+                {
+                    "airline": airline,
+                    "flight_numbers": set(),
+                    "departure_times": set(),
+                    "active_dates": set(),
+                    "weekday_counts": defaultdict(int),
+                    "weekday_dates": defaultdict(set),
+                },
+            )
+            if flight_number:
+                airline_entry["flight_numbers"].add(flight_number)
+            if dep_time:
+                airline_entry["departure_times"].add(dep_time)
+            if dep_date:
+                airline_entry["active_dates"].add(dep_date)
+            airline_entry["weekday_counts"][day_label] += 1
+            if dep_date:
+                airline_entry["weekday_dates"][day_label].add(dep_date)
+
+        airlines_payload: list[dict[str, Any]] = []
+        for airline, entry in sorted(
+            airline_map.items(),
+            key=lambda item: (_time_sort_key(min(item[1]["departure_times"]) if item[1]["departure_times"] else None), item[0]),
+        ):
+            departure_times = sorted(entry["departure_times"], key=_time_sort_key)
+            weekday_profile = [
+                {
+                    "day_label": day_label,
+                    "flight_instance_count": int(entry["weekday_counts"].get(day_label, 0)),
+                    "active_date_count": len(entry["weekday_dates"].get(day_label, set())),
+                }
+                for day_label in WEEKDAY_ORDER
+                if entry["weekday_counts"].get(day_label, 0) > 0
+            ]
+            timeline = sorted(
+                [
+                    {
+                        "cycle_id": str(item.get("cycle_id") or ""),
+                        "cycle_completed_at_utc": cycle_lookup.get(str(item.get("cycle_id") or ""), {}).get("cycle_completed_at_utc"),
+                        "flight_instance_count": int(item.get("flight_instance_count") or 0),
+                        "active_date_count": int(item.get("active_date_count") or 0),
+                        "first_departure_time": item.get("first_departure_time"),
+                        "last_departure_time": item.get("last_departure_time"),
+                    }
+                    for item in trend_airline_by_key.get((route_key, airline), [])
+                ],
+                key=lambda item: str(item.get("cycle_completed_at_utc") or item.get("cycle_id") or ""),
+            )
+            airlines_payload.append(
+                {
+                    "airline": airline,
+                    "flight_instance_count": len(
+                        [
+                            row
+                            for row in route_rows
+                            if str(row.get("airline") or "").strip() == airline
+                        ]
+                    ),
+                    "active_date_count": len(entry["active_dates"]),
+                    "first_departure_time": departure_times[0] if departure_times else None,
+                    "last_departure_time": departure_times[-1] if departure_times else None,
+                    "departure_times": departure_times,
+                    "flight_numbers": sorted(entry["flight_numbers"]),
+                    "weekday_profile": weekday_profile,
+                    "timeline": timeline,
+                }
+            )
+
+        weekday_profile = [
+            {
+                "day_label": item["day_label"],
+                "flight_instance_count": int(item["flight_instance_count"]),
+                "active_date_count": len(item["active_dates"]),
+                "airline_count": len(item["airlines"]),
+                "airlines": sorted(item["airlines"]),
+            }
+            for item in sorted(weekday_map.values(), key=lambda item: _weekday_sort_key(str(item["day_label"])))
+        ]
+        departure_days = [
+            {
+                "departure_date": item["departure_date"],
+                "day_label": item["day_label"],
+                "flight_instance_count": int(item["flight_instance_count"]),
+                "airline_count": len(item["airlines"]),
+                "first_departure_time": min(item["departure_times"], key=_time_sort_key) if item["departure_times"] else None,
+                "last_departure_time": max(item["departure_times"], key=_time_sort_key) if item["departure_times"] else None,
+            }
+            for item in sorted(departure_days_map.values(), key=lambda item: item["departure_date"])
+        ]
+        route_timeline = sorted(
+            [
+                {
+                    "cycle_id": str(item.get("cycle_id") or ""),
+                    "cycle_completed_at_utc": cycle_lookup.get(str(item.get("cycle_id") or ""), {}).get("cycle_completed_at_utc"),
+                    "flight_instance_count": int(item.get("flight_instance_count") or 0),
+                    "active_date_count": int(item.get("active_date_count") or 0),
+                    "airline_count": int(item.get("airline_count") or 0),
+                    "first_departure_time": item.get("first_departure_time"),
+                    "last_departure_time": item.get("last_departure_time"),
+                }
+                for item in trend_route_by_key.get(route_key, [])
+            ],
+            key=lambda item: str(item.get("cycle_completed_at_utc") or item.get("cycle_id") or ""),
+        )
+
+        route_times = sorted(
+            {
+                str(row.get("departure_time") or "").strip()
+                for row in route_rows
+                if str(row.get("departure_time") or "").strip()
+            },
+            key=_time_sort_key,
+        )
+        route_payloads.append(
+            {
+                **dict(route),
+                "airline_count": len(airline_map),
+                "flight_instance_count": len(route_rows),
+                "active_date_count": len(departure_days_map),
+                "first_departure_time": route_times[0] if route_times else None,
+                "last_departure_time": route_times[-1] if route_times else None,
+                "departure_times": route_times,
+                "departure_days": departure_days,
+                "weekday_profile": weekday_profile,
+                "airlines": airlines_payload,
+                "timeline": route_timeline,
+            }
+        )
+
+    return {"cycle_id": resolved_cycle_id, "routes": route_payloads}
+
+
+def _get_airline_operations_from_bigquery(
+    *,
+    cycle_id: str | None = None,
+    airlines: Sequence[str] | None = None,
+    origins: Sequence[str] | None = None,
+    destinations: Sequence[str] | None = None,
+    route_types: Sequence[str] | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    route_limit: int = 4,
+    trend_limit: int = 8,
+) -> dict[str, Any]:
+    resolved_cycle_id = _resolve_cycle_id_bigquery(cycle_id)
+    if not resolved_cycle_id:
+        return {"cycle_id": None, "routes": []}
+
+    route_filters = ["cycle_id = @cycle_id"]
+    route_params: list[bigquery.ScalarQueryParameter] = [
+        bigquery.ScalarQueryParameter("cycle_id", "STRING", resolved_cycle_id),
+    ]
+    if airlines:
+        route_filters.append("airline IN UNNEST(@airlines)")
+        route_params.append(bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines)))
+    if origins:
+        route_filters.append("origin IN UNNEST(@origins)")
+        route_params.append(bigquery.ArrayQueryParameter("origins", "STRING", _normalize_codes(origins)))
+    if destinations:
+        route_filters.append("destination IN UNNEST(@destinations)")
+        route_params.append(bigquery.ArrayQueryParameter("destinations", "STRING", _normalize_codes(destinations)))
+    if start_date:
+        route_filters.append("departure_date >= @start_date")
+        route_params.append(bigquery.ScalarQueryParameter("start_date", "DATE", start_date))
+    if end_date:
+        route_filters.append("departure_date <= @end_date")
+        route_params.append(bigquery.ScalarQueryParameter("end_date", "DATE", end_date))
+
+    route_rows = _serialize_warehouse_rows(
+        _run_bigquery_query(
+            f"""
+            SELECT
+              origin,
+              destination,
+              route_key,
+              COUNT(*) AS row_count
+            FROM {_bq_table("fact_offer_snapshot")}
+            WHERE {' AND '.join(route_filters)}
+            GROUP BY origin, destination, route_key
+            ORDER BY row_count DESC, route_key
+            LIMIT @route_scan_limit
+            """,
+            route_params + [bigquery.ScalarQueryParameter("route_scan_limit", "INT64", max(route_limit * 4, route_limit))],
+        )
+    )
+    selected_routes = _filter_route_type_records(_annotate_route_records(route_rows), route_types)[:route_limit]
+    if not selected_routes:
+        return {"cycle_id": resolved_cycle_id, "routes": []}
+
+    route_keys = [str(row["route_key"]) for row in selected_routes]
+    current_filters = ["cycle_id = @cycle_id", "route_key IN UNNEST(@route_keys)"]
+    current_params: list[bigquery.ScalarQueryParameter] = [
+        bigquery.ScalarQueryParameter("cycle_id", "STRING", resolved_cycle_id),
+        bigquery.ArrayQueryParameter("route_keys", "STRING", route_keys),
+    ]
+    if airlines:
+        current_filters.append("airline IN UNNEST(@airlines)")
+        current_params.append(bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines)))
+    if start_date:
+        current_filters.append("departure_date >= @start_date")
+        current_params.append(bigquery.ScalarQueryParameter("start_date", "DATE", start_date))
+    if end_date:
+        current_filters.append("departure_date <= @end_date")
+        current_params.append(bigquery.ScalarQueryParameter("end_date", "DATE", end_date))
+
+    current_rows = _serialize_warehouse_rows(
+        _run_bigquery_query(
+            f"""
+            WITH ranked_ops AS (
+              SELECT
+                cycle_id,
+                captured_at_utc,
+                airline,
+                origin,
+                destination,
+                route_key,
+                flight_number,
+                departure_date,
+                FORMAT_TIMESTAMP('%H:%M', departure_utc) AS departure_time,
+                ROW_NUMBER() OVER (
+                  PARTITION BY route_key, airline, flight_number, departure_date, FORMAT_TIMESTAMP('%H:%M', departure_utc)
+                  ORDER BY captured_at_utc DESC
+                ) AS row_num
+              FROM {_bq_table("fact_offer_snapshot")}
+              WHERE {' AND '.join(current_filters)}
+            )
+            SELECT
+              cycle_id,
+              captured_at_utc,
+              airline,
+              origin,
+              destination,
+              route_key,
+              flight_number,
+              departure_date,
+              departure_time
+            FROM ranked_ops
+            WHERE row_num = 1
+            ORDER BY route_key, departure_date, departure_time, airline, flight_number
+            """,
+            current_params,
+        )
+    )
+
+    recent_cycles = get_recent_cycles(None, limit=trend_limit)
+    trend_cycle_ids = [str(item.get("cycle_id") or "") for item in recent_cycles if item.get("cycle_id")]
+    if not trend_cycle_ids:
+        return _build_airline_operations_payload(
+            resolved_cycle_id=resolved_cycle_id,
+            selected_routes=selected_routes,
+            current_rows=current_rows,
+            trend_route_rows=[],
+            trend_airline_rows=[],
+            recent_cycles=[],
+        )
+
+    trend_base_filters = ["cycle_id IN UNNEST(@cycle_ids)", "route_key IN UNNEST(@route_keys)"]
+    trend_base_params: list[bigquery.ScalarQueryParameter] = [
+        bigquery.ArrayQueryParameter("cycle_ids", "STRING", trend_cycle_ids),
+        bigquery.ArrayQueryParameter("route_keys", "STRING", route_keys),
+    ]
+    if airlines:
+        trend_base_filters.append("airline IN UNNEST(@airlines)")
+        trend_base_params.append(bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines)))
+    if start_date:
+        trend_base_filters.append("departure_date >= @start_date")
+        trend_base_params.append(bigquery.ScalarQueryParameter("start_date", "DATE", start_date))
+    if end_date:
+        trend_base_filters.append("departure_date <= @end_date")
+        trend_base_params.append(bigquery.ScalarQueryParameter("end_date", "DATE", end_date))
+
+    trend_dedup = f"""
+      WITH dedup_ops AS (
+        SELECT DISTINCT
+          cycle_id,
+          airline,
+          origin,
+          destination,
+          route_key,
+          flight_number,
+          departure_date,
+          FORMAT_TIMESTAMP('%H:%M', departure_utc) AS departure_time
+        FROM {_bq_table("fact_offer_snapshot")}
+        WHERE {' AND '.join(trend_base_filters)}
+      )
+    """
+    trend_route_rows = _serialize_warehouse_rows(
+        _run_bigquery_query(
+            trend_dedup
+            + """
+            SELECT
+              cycle_id,
+              origin,
+              destination,
+              route_key,
+              COUNT(*) AS flight_instance_count,
+              COUNT(DISTINCT departure_date) AS active_date_count,
+              COUNT(DISTINCT airline) AS airline_count,
+              MIN(departure_time) AS first_departure_time,
+              MAX(departure_time) AS last_departure_time
+            FROM dedup_ops
+            GROUP BY cycle_id, origin, destination, route_key
+            ORDER BY route_key, cycle_id
+            """,
+            trend_base_params,
+        )
+    )
+    trend_airline_rows = _serialize_warehouse_rows(
+        _run_bigquery_query(
+            trend_dedup
+            + """
+            SELECT
+              cycle_id,
+              airline,
+              origin,
+              destination,
+              route_key,
+              COUNT(*) AS flight_instance_count,
+              COUNT(DISTINCT departure_date) AS active_date_count,
+              MIN(departure_time) AS first_departure_time,
+              MAX(departure_time) AS last_departure_time
+            FROM dedup_ops
+            GROUP BY cycle_id, airline, origin, destination, route_key
+            ORDER BY route_key, cycle_id, airline
+            """,
+            trend_base_params,
+        )
+    )
+
+    return _build_airline_operations_payload(
+        resolved_cycle_id=resolved_cycle_id,
+        selected_routes=selected_routes,
+        current_rows=current_rows,
+        trend_route_rows=trend_route_rows,
+        trend_airline_rows=trend_airline_rows,
+        recent_cycles=recent_cycles,
+    )
+
+
+def get_airline_operations(
+    session: Session | None,
+    cycle_id: str | None = None,
+    airlines: Sequence[str] | None = None,
+    origins: Sequence[str] | None = None,
+    destinations: Sequence[str] | None = None,
+    route_types: Sequence[str] | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    route_limit: int = 4,
+    trend_limit: int = 8,
+) -> dict[str, Any]:
+    if _bigquery_ready():
+        try:
+            return _get_airline_operations_from_bigquery(
+                cycle_id=cycle_id,
+                airlines=airlines,
+                origins=origins,
+                destinations=destinations,
+                route_types=route_types,
+                start_date=start_date,
+                end_date=end_date,
+                route_limit=route_limit,
+                trend_limit=trend_limit,
+            )
+        except (GoogleAPIError, RuntimeError, ValueError):
+            pass
+
+    resolved_cycle_id = _resolve_cycle_id(session, cycle_id) if session is not None else None
+    if not resolved_cycle_id or session is None:
+        return {"cycle_id": None, "routes": []}
+
+    route_clauses = ["fo.scrape_id = CAST(:cycle_id AS uuid)"]
+    route_params: dict[str, Any] = {"cycle_id": resolved_cycle_id, "route_scan_limit": max(route_limit * 4, route_limit)}
+    _apply_in_filter(route_clauses, route_params, "fo.airline", airlines, "ops_route_airline")
+    _apply_in_filter(route_clauses, route_params, "fo.origin", origins, "ops_route_origin")
+    _apply_in_filter(route_clauses, route_params, "fo.destination", destinations, "ops_route_destination")
+    if start_date:
+        route_clauses.append("fo.departure::date >= :start_date")
+        route_params["start_date"] = start_date
+    if end_date:
+        route_clauses.append("fo.departure::date <= :end_date")
+        route_params["end_date"] = end_date
+
+    route_rows = session.execute(
+        text(
+            f"""
+            SELECT
+              fo.origin,
+              fo.destination,
+              (fo.origin || '-' || fo.destination) AS route_key,
+              COUNT(*) AS row_count
+            FROM flight_offers fo
+            WHERE {' AND '.join(route_clauses)}
+            GROUP BY fo.origin, fo.destination
+            ORDER BY row_count DESC, route_key
+            LIMIT :route_scan_limit
+            """
+        ),
+        route_params,
+    ).mappings().all()
+    selected_routes = _filter_route_type_records(_annotate_route_records(_rows_to_dicts([dict(row) for row in route_rows])), route_types)[:route_limit]
+    if not selected_routes:
+        return {"cycle_id": resolved_cycle_id, "routes": []}
+
+    route_keys = [str(row["route_key"]) for row in selected_routes]
+    current_clauses = ["fo.scrape_id = CAST(:cycle_id AS uuid)"]
+    current_params: dict[str, Any] = {"cycle_id": resolved_cycle_id}
+    _apply_in_filter(current_clauses, current_params, "(fo.origin || '-' || fo.destination)", route_keys, "ops_current_route")
+    _apply_in_filter(current_clauses, current_params, "fo.airline", airlines, "ops_current_airline")
+    if start_date:
+        current_clauses.append("fo.departure::date >= :start_date")
+        current_params["start_date"] = start_date
+    if end_date:
+        current_clauses.append("fo.departure::date <= :end_date")
+        current_params["end_date"] = end_date
+
+    current_rows = session.execute(
+        text(
+            f"""
+            SELECT
+              current_ops.cycle_id,
+              current_ops.captured_at_utc,
+              current_ops.airline,
+              current_ops.origin,
+              current_ops.destination,
+              current_ops.route_key,
+              current_ops.flight_number,
+              current_ops.departure_date,
+              current_ops.departure_time
+            FROM (
+              SELECT DISTINCT ON (
+                (fo.origin || '-' || fo.destination),
+                fo.airline,
+                fo.flight_number,
+                fo.departure::date,
+                TO_CHAR(fo.departure, 'HH24:MI')
+              )
+                fo.scrape_id::text AS cycle_id,
+                fo.scraped_at AS captured_at_utc,
+                fo.airline,
+                fo.origin,
+                fo.destination,
+                (fo.origin || '-' || fo.destination) AS route_key,
+                fo.flight_number,
+                fo.departure::date AS departure_date,
+                TO_CHAR(fo.departure, 'HH24:MI') AS departure_time
+              FROM flight_offers fo
+              WHERE {' AND '.join(current_clauses)}
+              ORDER BY
+                (fo.origin || '-' || fo.destination),
+                fo.airline,
+                fo.flight_number,
+                fo.departure::date,
+                TO_CHAR(fo.departure, 'HH24:MI'),
+                fo.scraped_at DESC
+            ) current_ops
+            ORDER BY current_ops.route_key, current_ops.departure_date, current_ops.departure_time, current_ops.airline, current_ops.flight_number
+            """
+        ),
+        current_params,
+    ).mappings().all()
+    current_dicts = _rows_to_dicts([dict(row) for row in current_rows])
+
+    recent_cycles = get_recent_cycles(session, limit=trend_limit)
+    trend_cycle_ids = [str(item.get("cycle_id") or "") for item in recent_cycles if item.get("cycle_id")]
+    if not trend_cycle_ids:
+        return _build_airline_operations_payload(
+            resolved_cycle_id=resolved_cycle_id,
+            selected_routes=selected_routes,
+            current_rows=current_dicts,
+            trend_route_rows=[],
+            trend_airline_rows=[],
+            recent_cycles=[],
+        )
+
+    trend_clauses = []
+    trend_params: dict[str, Any] = {}
+    _apply_in_filter(trend_clauses, trend_params, "trend_ops.cycle_id", trend_cycle_ids, "ops_trend_cycle", uppercase=False)
+    _apply_in_filter(trend_clauses, trend_params, "trend_ops.route_key", route_keys, "ops_trend_route")
+    _apply_in_filter(trend_clauses, trend_params, "trend_ops.airline", airlines, "ops_trend_airline")
+    if start_date:
+        trend_clauses.append("trend_ops.departure_date >= :start_date")
+        trend_params["start_date"] = start_date
+    if end_date:
+        trend_clauses.append("trend_ops.departure_date <= :end_date")
+        trend_params["end_date"] = end_date
+
+    trend_where = " AND ".join(trend_clauses) if trend_clauses else "1=1"
+    trend_route_rows = session.execute(
+        text(
+            f"""
+            WITH trend_ops AS (
+              SELECT DISTINCT
+                fo.scrape_id::text AS cycle_id,
+                fo.airline,
+                fo.origin,
+                fo.destination,
+                (fo.origin || '-' || fo.destination) AS route_key,
+                fo.flight_number,
+                fo.departure::date AS departure_date,
+                TO_CHAR(fo.departure, 'HH24:MI') AS departure_time
+              FROM flight_offers fo
+            )
+            SELECT
+              trend_ops.cycle_id,
+              trend_ops.origin,
+              trend_ops.destination,
+              trend_ops.route_key,
+              COUNT(*) AS flight_instance_count,
+              COUNT(DISTINCT trend_ops.departure_date) AS active_date_count,
+              COUNT(DISTINCT trend_ops.airline) AS airline_count,
+              MIN(trend_ops.departure_time) AS first_departure_time,
+              MAX(trend_ops.departure_time) AS last_departure_time
+            FROM trend_ops
+            WHERE {trend_where}
+            GROUP BY trend_ops.cycle_id, trend_ops.origin, trend_ops.destination, trend_ops.route_key
+            ORDER BY trend_ops.route_key, trend_ops.cycle_id
+            """
+        ),
+        trend_params,
+    ).mappings().all()
+    trend_airline_rows = session.execute(
+        text(
+            f"""
+            WITH trend_ops AS (
+              SELECT DISTINCT
+                fo.scrape_id::text AS cycle_id,
+                fo.airline,
+                fo.origin,
+                fo.destination,
+                (fo.origin || '-' || fo.destination) AS route_key,
+                fo.flight_number,
+                fo.departure::date AS departure_date,
+                TO_CHAR(fo.departure, 'HH24:MI') AS departure_time
+              FROM flight_offers fo
+            )
+            SELECT
+              trend_ops.cycle_id,
+              trend_ops.airline,
+              trend_ops.origin,
+              trend_ops.destination,
+              trend_ops.route_key,
+              COUNT(*) AS flight_instance_count,
+              COUNT(DISTINCT trend_ops.departure_date) AS active_date_count,
+              MIN(trend_ops.departure_time) AS first_departure_time,
+              MAX(trend_ops.departure_time) AS last_departure_time
+            FROM trend_ops
+            WHERE {trend_where}
+            GROUP BY trend_ops.cycle_id, trend_ops.airline, trend_ops.origin, trend_ops.destination, trend_ops.route_key
+            ORDER BY trend_ops.route_key, trend_ops.cycle_id, trend_ops.airline
+            """
+        ),
+        trend_params,
+    ).mappings().all()
+
+    return _build_airline_operations_payload(
+        resolved_cycle_id=resolved_cycle_id,
+        selected_routes=selected_routes,
+        current_rows=current_dicts,
+        trend_route_rows=_rows_to_dicts([dict(row) for row in trend_route_rows]),
+        trend_airline_rows=_rows_to_dicts([dict(row) for row in trend_airline_rows]),
+        recent_cycles=recent_cycles,
     )
 
 
@@ -1542,7 +2555,7 @@ def get_route_summary(
         ),
         params,
     ).mappings().all()
-    return _rows_to_dicts([dict(row) for row in rows])
+    return _annotate_route_records(_rows_to_dicts([dict(row) for row in rows]))
 
 
 def get_change_events(
@@ -1559,32 +2572,17 @@ def get_change_events(
 ) -> list[dict[str, Any]]:
     if _bigquery_ready():
         try:
-            filters = ["1=1"]
-            params: list[bigquery.ScalarQueryParameter] = [bigquery.ScalarQueryParameter("row_limit", "INT64", limit)]
-            if start_date:
-                filters.append("report_day >= @start_date")
-                params.append(bigquery.ScalarQueryParameter("start_date", "DATE", start_date))
-            if end_date:
-                filters.append("report_day <= @end_date")
-                params.append(bigquery.ScalarQueryParameter("end_date", "DATE", end_date))
-            if airlines:
-                filters.append("airline IN UNNEST(@airlines)")
-                params.append(bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines)))
-            if origins:
-                filters.append("origin IN UNNEST(@origins)")
-                params.append(bigquery.ArrayQueryParameter("origins", "STRING", _normalize_codes(origins)))
-            if destinations:
-                filters.append("destination IN UNNEST(@destinations)")
-                params.append(bigquery.ArrayQueryParameter("destinations", "STRING", _normalize_codes(destinations)))
-            if domains:
-                filters.append("domain IN UNNEST(@domains)")
-                params.append(bigquery.ArrayQueryParameter("domains", "STRING", _normalize_codes(domains, uppercase=False)))
-            if change_types:
-                filters.append("change_type IN UNNEST(@change_types)")
-                params.append(bigquery.ArrayQueryParameter("change_types", "STRING", _normalize_codes(change_types, uppercase=False)))
-            if directions:
-                filters.append("direction IN UNNEST(@directions)")
-                params.append(bigquery.ArrayQueryParameter("directions", "STRING", _normalize_codes(directions, uppercase=False)))
+            filters, params = _build_change_bigquery_filter_state(
+                start_date=start_date,
+                end_date=end_date,
+                airlines=airlines,
+                origins=origins,
+                destinations=destinations,
+                domains=domains,
+                change_types=change_types,
+                directions=directions,
+            )
+            params = params + [bigquery.ScalarQueryParameter("row_limit", "INT64", limit)]
 
             rows = _run_bigquery_query(
                 f"""
@@ -1619,25 +2617,22 @@ def get_change_events(
                 """,
                 params,
             )
-            return _serialize_warehouse_rows(rows)
+            return _annotate_route_records(_serialize_warehouse_rows(rows))
         except (GoogleAPIError, RuntimeError, ValueError):
             pass
     if session is None:
         return []
-    clauses = ["1=1"]
-    params: dict[str, Any] = {"limit": limit}
-    if start_date:
-        clauses.append("cce.detected_at::date >= :start_date")
-        params["start_date"] = start_date
-    if end_date:
-        clauses.append("cce.detected_at::date <= :end_date")
-        params["end_date"] = end_date
-    _apply_in_filter(clauses, params, "cce.airline", airlines, "airline")
-    _apply_in_filter(clauses, params, "cce.origin", origins, "origin")
-    _apply_in_filter(clauses, params, "cce.destination", destinations, "destination")
-    _apply_in_filter(clauses, params, "cce.domain", domains, "domain", uppercase=False)
-    _apply_in_filter(clauses, params, "cce.change_type", change_types, "change_type", uppercase=False)
-    _apply_in_filter(clauses, params, "cce.direction", directions, "direction", uppercase=False)
+    clauses, params = _build_change_sql_filter_state(
+        start_date=start_date,
+        end_date=end_date,
+        airlines=airlines,
+        origins=origins,
+        destinations=destinations,
+        domains=domains,
+        change_types=change_types,
+        directions=directions,
+    )
+    params["limit"] = limit
 
     rows = session.execute(
         text(
@@ -1674,7 +2669,368 @@ def get_change_events(
         ),
         params,
     ).mappings().all()
-    return _rows_to_dicts([dict(row) for row in rows])
+    return _annotate_route_records(_rows_to_dicts([dict(row) for row in rows]))
+
+
+def get_change_dashboard(
+    session: Session | None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    airlines: Sequence[str] | None = None,
+    origins: Sequence[str] | None = None,
+    destinations: Sequence[str] | None = None,
+    domains: Sequence[str] | None = None,
+    change_types: Sequence[str] | None = None,
+    directions: Sequence[str] | None = None,
+    top_n: int = 8,
+) -> dict[str, Any]:
+    if _bigquery_ready():
+        try:
+            filters, base_params = _build_change_bigquery_filter_state(
+                start_date=start_date,
+                end_date=end_date,
+                airlines=airlines,
+                origins=origins,
+                destinations=destinations,
+                domains=domains,
+                change_types=change_types,
+                directions=directions,
+            )
+            top_params = base_params + [bigquery.ScalarQueryParameter("top_n", "INT64", top_n)]
+
+            summary_rows = _serialize_warehouse_rows(
+                _run_bigquery_query(
+                    f"""
+                    SELECT
+                      COUNT(*) AS event_count,
+                      COUNT(DISTINCT route_key) AS route_count,
+                      COUNT(DISTINCT airline) AS airline_count,
+                      MAX(detected_at_utc) AS latest_event_at_utc,
+                      COUNTIF(direction = 'up') AS up_count,
+                      COUNTIF(direction = 'down') AS down_count,
+                      COUNTIF(change_type = 'added') AS added_count,
+                      COUNTIF(change_type = 'removed') AS removed_count,
+                      COUNTIF(domain = 'price') AS price_event_count,
+                      COUNTIF(domain = 'availability') AS availability_event_count,
+                      COUNTIF(domain = 'schedule') AS schedule_event_count,
+                      COUNTIF(domain = 'tax') AS tax_event_count,
+                      COUNTIF(domain = 'penalty') AS penalty_event_count
+                    FROM {_bq_table("fact_change_event")}
+                    WHERE {' AND '.join(filters)}
+                    """,
+                    base_params,
+                )
+            )
+            daily_rows = _serialize_warehouse_rows(
+                _run_bigquery_query(
+                    f"""
+                    SELECT
+                      report_day,
+                      COUNT(*) AS event_count,
+                      COUNT(DISTINCT route_key) AS route_count,
+                      COUNT(DISTINCT airline) AS airline_count,
+                      COUNTIF(direction = 'up') AS up_count,
+                      COUNTIF(direction = 'down') AS down_count,
+                      COUNTIF(change_type = 'added') AS added_count,
+                      COUNTIF(change_type = 'removed') AS removed_count
+                    FROM {_bq_table("fact_change_event")}
+                    WHERE {' AND '.join(filters)}
+                    GROUP BY report_day
+                    ORDER BY report_day
+                    """,
+                    base_params,
+                )
+            )
+            route_rows = _serialize_warehouse_rows(
+                _run_bigquery_query(
+                    f"""
+                    SELECT
+                      origin,
+                      destination,
+                      route_key,
+                      COUNT(*) AS event_count,
+                      COUNT(DISTINCT airline) AS airline_count,
+                      MAX(detected_at_utc) AS latest_event_at_utc
+                    FROM {_bq_table("fact_change_event")}
+                    WHERE {' AND '.join(filters)}
+                    GROUP BY origin, destination, route_key
+                    ORDER BY event_count DESC, route_key
+                    LIMIT @top_n
+                    """,
+                    top_params,
+                )
+            )
+            airline_rows = _serialize_warehouse_rows(
+                _run_bigquery_query(
+                    f"""
+                    SELECT
+                      airline,
+                      COUNT(*) AS event_count,
+                      COUNT(DISTINCT route_key) AS route_count,
+                      MAX(detected_at_utc) AS latest_event_at_utc
+                    FROM {_bq_table("fact_change_event")}
+                    WHERE {' AND '.join(filters)}
+                    GROUP BY airline
+                    ORDER BY event_count DESC, airline
+                    LIMIT @top_n
+                    """,
+                    top_params,
+                )
+            )
+            domain_rows = _serialize_warehouse_rows(
+                _run_bigquery_query(
+                    f"""
+                    SELECT
+                      COALESCE(domain, 'unclassified') AS domain,
+                      COUNT(*) AS event_count
+                    FROM {_bq_table("fact_change_event")}
+                    WHERE {' AND '.join(filters)}
+                    GROUP BY domain
+                    ORDER BY event_count DESC, domain
+                    LIMIT @top_n
+                    """,
+                    top_params,
+                )
+            )
+            field_rows = _serialize_warehouse_rows(
+                _run_bigquery_query(
+                    f"""
+                    SELECT
+                      field_name,
+                      COUNT(*) AS event_count
+                    FROM {_bq_table("fact_change_event")}
+                    WHERE {' AND '.join(filters)}
+                    GROUP BY field_name
+                    ORDER BY event_count DESC, field_name
+                    LIMIT @top_n
+                    """,
+                    top_params,
+                )
+            )
+            largest_moves = _serialize_warehouse_rows(
+                _run_bigquery_query(
+                    f"""
+                    SELECT
+                      ROW_NUMBER() OVER (ORDER BY ABS(magnitude) DESC NULLS LAST, detected_at_utc DESC) AS id,
+                      cycle_id,
+                      previous_cycle_id,
+                      detected_at_utc,
+                      airline,
+                      origin,
+                      destination,
+                      route_key,
+                      flight_number,
+                      departure_day,
+                      departure_time,
+                      cabin,
+                      fare_basis,
+                      brand,
+                      domain,
+                      change_type,
+                      direction,
+                      field_name,
+                      old_value,
+                      new_value,
+                      magnitude,
+                      percent_change,
+                      event_meta
+                    FROM {_bq_table("fact_change_event")}
+                    WHERE {' AND '.join(filters)}
+                    ORDER BY ABS(magnitude) DESC NULLS LAST, detected_at_utc DESC, airline, route_key
+                    LIMIT @top_n
+                    """,
+                    top_params,
+                )
+            )
+            return _build_change_dashboard_payload(
+                summary_row=summary_rows[0] if summary_rows else None,
+                daily_rows=daily_rows,
+                route_rows=route_rows,
+                airline_rows=airline_rows,
+                domain_rows=domain_rows,
+                field_rows=field_rows,
+                largest_moves=largest_moves,
+            )
+        except (GoogleAPIError, RuntimeError, ValueError):
+            pass
+
+    if session is None:
+        return _build_change_dashboard_payload(
+            summary_row=None,
+            daily_rows=[],
+            route_rows=[],
+            airline_rows=[],
+            domain_rows=[],
+            field_rows=[],
+            largest_moves=[],
+        )
+
+    clauses, params = _build_change_sql_filter_state(
+        start_date=start_date,
+        end_date=end_date,
+        airlines=airlines,
+        origins=origins,
+        destinations=destinations,
+        domains=domains,
+        change_types=change_types,
+        directions=directions,
+    )
+    params["top_n"] = top_n
+
+    summary_row = session.execute(
+        text(
+            f"""
+            SELECT
+                COUNT(*) AS event_count,
+                COUNT(DISTINCT (cce.origin || '-' || cce.destination)) AS route_count,
+                COUNT(DISTINCT cce.airline) AS airline_count,
+                MAX(cce.detected_at) AS latest_event_at_utc,
+                COUNT(*) FILTER (WHERE cce.direction = 'up') AS up_count,
+                COUNT(*) FILTER (WHERE cce.direction = 'down') AS down_count,
+                COUNT(*) FILTER (WHERE cce.change_type = 'added') AS added_count,
+                COUNT(*) FILTER (WHERE cce.change_type = 'removed') AS removed_count,
+                COUNT(*) FILTER (WHERE cce.domain = 'price') AS price_event_count,
+                COUNT(*) FILTER (WHERE cce.domain = 'availability') AS availability_event_count,
+                COUNT(*) FILTER (WHERE cce.domain = 'schedule') AS schedule_event_count,
+                COUNT(*) FILTER (WHERE cce.domain = 'tax') AS tax_event_count,
+                COUNT(*) FILTER (WHERE cce.domain = 'penalty') AS penalty_event_count
+            FROM airline_intel.column_change_events cce
+            WHERE {' AND '.join(clauses)}
+            """
+        ),
+        params,
+    ).mappings().first()
+    daily_rows = session.execute(
+        text(
+            f"""
+            SELECT
+                cce.detected_at::date AS report_day,
+                COUNT(*) AS event_count,
+                COUNT(DISTINCT (cce.origin || '-' || cce.destination)) AS route_count,
+                COUNT(DISTINCT cce.airline) AS airline_count,
+                COUNT(*) FILTER (WHERE cce.direction = 'up') AS up_count,
+                COUNT(*) FILTER (WHERE cce.direction = 'down') AS down_count,
+                COUNT(*) FILTER (WHERE cce.change_type = 'added') AS added_count,
+                COUNT(*) FILTER (WHERE cce.change_type = 'removed') AS removed_count
+            FROM airline_intel.column_change_events cce
+            WHERE {' AND '.join(clauses)}
+            GROUP BY cce.detected_at::date
+            ORDER BY report_day
+            """
+        ),
+        params,
+    ).mappings().all()
+    route_rows = session.execute(
+        text(
+            f"""
+            SELECT
+                cce.origin,
+                cce.destination,
+                (cce.origin || '-' || cce.destination) AS route_key,
+                COUNT(*) AS event_count,
+                COUNT(DISTINCT cce.airline) AS airline_count,
+                MAX(cce.detected_at) AS latest_event_at_utc
+            FROM airline_intel.column_change_events cce
+            WHERE {' AND '.join(clauses)}
+            GROUP BY cce.origin, cce.destination
+            ORDER BY event_count DESC, route_key
+            LIMIT :top_n
+            """
+        ),
+        params,
+    ).mappings().all()
+    airline_rows = session.execute(
+        text(
+            f"""
+            SELECT
+                cce.airline,
+                COUNT(*) AS event_count,
+                COUNT(DISTINCT (cce.origin || '-' || cce.destination)) AS route_count,
+                MAX(cce.detected_at) AS latest_event_at_utc
+            FROM airline_intel.column_change_events cce
+            WHERE {' AND '.join(clauses)}
+            GROUP BY cce.airline
+            ORDER BY event_count DESC, cce.airline
+            LIMIT :top_n
+            """
+        ),
+        params,
+    ).mappings().all()
+    domain_rows = session.execute(
+        text(
+            f"""
+            SELECT
+                COALESCE(cce.domain, 'unclassified') AS domain,
+                COUNT(*) AS event_count
+            FROM airline_intel.column_change_events cce
+            WHERE {' AND '.join(clauses)}
+            GROUP BY COALESCE(cce.domain, 'unclassified')
+            ORDER BY event_count DESC, domain
+            LIMIT :top_n
+            """
+        ),
+        params,
+    ).mappings().all()
+    field_rows = session.execute(
+        text(
+            f"""
+            SELECT
+                cce.field_name,
+                COUNT(*) AS event_count
+            FROM airline_intel.column_change_events cce
+            WHERE {' AND '.join(clauses)}
+            GROUP BY cce.field_name
+            ORDER BY event_count DESC, cce.field_name
+            LIMIT :top_n
+            """
+        ),
+        params,
+    ).mappings().all()
+    largest_moves = session.execute(
+        text(
+            f"""
+            SELECT
+                cce.id,
+                cce.scrape_id::text AS cycle_id,
+                cce.previous_scrape_id::text AS previous_cycle_id,
+                cce.detected_at AS detected_at_utc,
+                cce.airline,
+                cce.origin,
+                cce.destination,
+                (cce.origin || '-' || cce.destination) AS route_key,
+                cce.flight_number,
+                cce.departure_day,
+                cce.departure_time,
+                cce.cabin,
+                cce.fare_basis,
+                cce.brand,
+                cce.domain,
+                cce.change_type,
+                cce.direction,
+                cce.field_name,
+                cce.old_value,
+                cce.new_value,
+                cce.magnitude,
+                cce.percent_change,
+                cce.event_meta
+            FROM airline_intel.column_change_events cce
+            WHERE {' AND '.join(clauses)}
+            ORDER BY ABS(cce.magnitude) DESC NULLS LAST, cce.detected_at DESC, cce.id DESC
+            LIMIT :top_n
+            """
+        ),
+        params,
+    ).mappings().all()
+
+    return _build_change_dashboard_payload(
+        summary_row=dict(summary_row) if summary_row else None,
+        daily_rows=_rows_to_dicts([dict(row) for row in daily_rows]),
+        route_rows=_rows_to_dicts([dict(row) for row in route_rows]),
+        airline_rows=_rows_to_dicts([dict(row) for row in airline_rows]),
+        domain_rows=_rows_to_dicts([dict(row) for row in domain_rows]),
+        field_rows=_rows_to_dicts([dict(row) for row in field_rows]),
+        largest_moves=_rows_to_dicts([dict(row) for row in largest_moves]),
+    )
 
 
 def get_penalties(
@@ -1747,7 +3103,7 @@ def get_penalties(
                 """,
                 params,
             )
-            return {"cycle_id": resolved_cycle_id, "rows": _serialize_warehouse_rows(rows)}
+            return {"cycle_id": resolved_cycle_id, "rows": _annotate_route_records(_serialize_warehouse_rows(rows))}
         except (GoogleAPIError, RuntimeError, ValueError):
             pass
     resolved_cycle_id = _resolve_cycle_id(session, cycle_id)
@@ -1808,7 +3164,93 @@ def get_penalties(
         ),
         params,
     ).mappings().all()
-    return {"cycle_id": resolved_cycle_id, "rows": _rows_to_dicts([dict(row) for row in rows])}
+    return {"cycle_id": resolved_cycle_id, "rows": _annotate_route_records(_rows_to_dicts([dict(row) for row in rows]))}
+
+
+def _build_tax_monitor_payload(
+    *,
+    resolved_cycle_id: str,
+    detail_rows: Sequence[dict[str, Any]],
+    route_summaries: Sequence[dict[str, Any]],
+    airline_summaries: Sequence[dict[str, Any]],
+    route_trend_rows: Sequence[dict[str, Any]],
+    airline_trend_rows: Sequence[dict[str, Any]],
+    recent_cycles: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    cycle_lookup = {
+        str(item.get("cycle_id") or ""): item
+        for item in recent_cycles
+        if item.get("cycle_id")
+    }
+
+    route_trend_map: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in route_trend_rows:
+        route_trend_map[str(row.get("route_key") or "")].append(dict(row))
+
+    airline_trend_map: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in airline_trend_rows:
+        airline_trend_map[(str(row.get("route_key") or ""), str(row.get("airline") or ""))].append(dict(row))
+
+    annotated_routes = _annotate_route_records(route_summaries)
+    annotated_airlines = _annotate_route_records(airline_summaries)
+    annotated_rows = _annotate_route_records(detail_rows)
+
+    for item in annotated_routes:
+        timeline = sorted(
+            [
+                {
+                    **trend_item,
+                    "cycle_completed_at_utc": cycle_lookup.get(str(trend_item.get("cycle_id") or ""), {}).get("cycle_completed_at_utc"),
+                }
+                for trend_item in route_trend_map.get(str(item.get("route_key") or ""), [])
+            ],
+            key=lambda trend_item: str(trend_item.get("cycle_completed_at_utc") or trend_item.get("cycle_id") or ""),
+        )
+        item["timeline"] = timeline
+        if len(timeline) >= 2:
+            item["avg_tax_change_amount"] = float(timeline[-1].get("avg_tax_amount") or 0) - float(timeline[-2].get("avg_tax_amount") or 0)
+        else:
+            item["avg_tax_change_amount"] = None
+
+    for item in annotated_airlines:
+        timeline = sorted(
+            [
+                {
+                    **trend_item,
+                    "cycle_completed_at_utc": cycle_lookup.get(str(trend_item.get("cycle_id") or ""), {}).get("cycle_completed_at_utc"),
+                }
+                for trend_item in airline_trend_map.get((str(item.get("route_key") or ""), str(item.get("airline") or "")), [])
+            ],
+            key=lambda trend_item: str(trend_item.get("cycle_completed_at_utc") or trend_item.get("cycle_id") or ""),
+        )
+        item["timeline"] = timeline
+        if len(timeline) >= 2:
+            item["avg_tax_change_amount"] = float(timeline[-1].get("avg_tax_amount") or 0) - float(timeline[-2].get("avg_tax_amount") or 0)
+        else:
+            item["avg_tax_change_amount"] = None
+
+    annotated_routes.sort(
+        key=lambda item: (
+            -float(item.get("spread_amount") or 0),
+            -abs(float(item.get("avg_tax_change_amount") or 0)),
+            str(item.get("route_key") or ""),
+        )
+    )
+    annotated_airlines.sort(
+        key=lambda item: (
+            -abs(float(item.get("avg_tax_change_amount") or 0)),
+            -float(item.get("spread_amount") or 0),
+            str(item.get("route_key") or ""),
+            str(item.get("airline") or ""),
+        )
+    )
+
+    return {
+        "cycle_id": resolved_cycle_id,
+        "rows": annotated_rows,
+        "route_summaries": annotated_routes,
+        "airline_summaries": annotated_airlines,
+    }
 
 
 def get_taxes(
@@ -1817,66 +3259,247 @@ def get_taxes(
     airlines: Sequence[str] | None = None,
     origins: Sequence[str] | None = None,
     destinations: Sequence[str] | None = None,
+    route_types: Sequence[str] | None = None,
     limit: int = 500,
+    trend_limit: int = 8,
 ) -> dict[str, Any]:
     if _bigquery_ready():
         try:
             resolved_cycle_id = _resolve_cycle_id_bigquery(cycle_id)
             if not resolved_cycle_id:
-                return {"cycle_id": None, "rows": []}
-            filters = ["cycle_id = @cycle_id", "tax_amount IS NOT NULL"]
-            params: list[bigquery.ScalarQueryParameter] = [
+                return {"cycle_id": None, "rows": [], "route_summaries": [], "airline_summaries": []}
+            route_filters = ["cycle_id = @cycle_id", "tax_amount IS NOT NULL"]
+            route_params: list[bigquery.ScalarQueryParameter] = [
                 bigquery.ScalarQueryParameter("cycle_id", "STRING", resolved_cycle_id),
+            ]
+            if airlines:
+                route_filters.append("airline IN UNNEST(@airlines)")
+                route_params.append(bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines)))
+            if origins:
+                route_filters.append("origin IN UNNEST(@origins)")
+                route_params.append(bigquery.ArrayQueryParameter("origins", "STRING", _normalize_codes(origins)))
+            if destinations:
+                route_filters.append("destination IN UNNEST(@destinations)")
+                route_params.append(bigquery.ArrayQueryParameter("destinations", "STRING", _normalize_codes(destinations)))
+
+            route_summary_rows = _serialize_warehouse_rows(
+                _run_bigquery_query(
+                    f"""
+                    SELECT
+                      origin,
+                      destination,
+                      route_key,
+                      COUNT(*) AS row_count,
+                      COUNT(DISTINCT airline) AS airline_count,
+                      MIN(tax_amount) AS min_tax_amount,
+                      MAX(tax_amount) AS max_tax_amount,
+                      AVG(tax_amount) AS avg_tax_amount,
+                      MAX(tax_amount) - MIN(tax_amount) AS spread_amount,
+                      MAX(captured_at_utc) AS latest_captured_at_utc
+                    FROM {_bq_table("fact_tax_snapshot")}
+                    WHERE {' AND '.join(route_filters)}
+                    GROUP BY origin, destination, route_key
+                    ORDER BY route_key
+                    """,
+                    route_params,
+                )
+            )
+            route_summaries = _filter_route_type_records(_annotate_route_records(route_summary_rows), route_types)
+            if not route_summaries:
+                return {"cycle_id": resolved_cycle_id, "rows": [], "route_summaries": [], "airline_summaries": []}
+
+            route_keys = [str(item["route_key"]) for item in route_summaries]
+            detail_filters = ["cycle_id = @cycle_id", "tax_amount IS NOT NULL", "route_key IN UNNEST(@route_keys)"]
+            detail_params: list[bigquery.ScalarQueryParameter] = [
+                bigquery.ScalarQueryParameter("cycle_id", "STRING", resolved_cycle_id),
+                bigquery.ArrayQueryParameter("route_keys", "STRING", route_keys),
                 bigquery.ScalarQueryParameter("row_limit", "INT64", limit),
             ]
             if airlines:
-                filters.append("airline IN UNNEST(@airlines)")
-                params.append(bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines)))
-            if origins:
-                filters.append("origin IN UNNEST(@origins)")
-                params.append(bigquery.ArrayQueryParameter("origins", "STRING", _normalize_codes(origins)))
-            if destinations:
-                filters.append("destination IN UNNEST(@destinations)")
-                params.append(bigquery.ArrayQueryParameter("destinations", "STRING", _normalize_codes(destinations)))
+                detail_filters.append("airline IN UNNEST(@airlines)")
+                detail_params.append(bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines)))
 
-            rows = _run_bigquery_query(
-                f"""
-                SELECT
-                  cycle_id,
-                  captured_at_utc,
-                  airline,
-                  origin,
-                  destination,
-                  route_key,
-                  flight_number,
-                  departure_utc,
-                  cabin,
-                  fare_basis,
-                  tax_amount,
-                  currency
-                FROM {_bq_table("fact_tax_snapshot")}
-                WHERE {' AND '.join(filters)}
-                ORDER BY origin, destination, departure_utc, airline, flight_number
-                LIMIT @row_limit
-                """,
-                params,
+            rows = _serialize_warehouse_rows(
+                _run_bigquery_query(
+                    f"""
+                    SELECT
+                      cycle_id,
+                      captured_at_utc,
+                      airline,
+                      origin,
+                      destination,
+                      route_key,
+                      flight_number,
+                      departure_utc,
+                      cabin,
+                      fare_basis,
+                      tax_amount,
+                      currency
+                    FROM {_bq_table("fact_tax_snapshot")}
+                    WHERE {' AND '.join(detail_filters)}
+                    ORDER BY origin, destination, departure_utc, airline, flight_number
+                    LIMIT @row_limit
+                    """,
+                    detail_params,
+                )
             )
-            return {"cycle_id": resolved_cycle_id, "rows": _serialize_warehouse_rows(rows)}
+
+            airline_summary_rows = _serialize_warehouse_rows(
+                _run_bigquery_query(
+                    f"""
+                    SELECT
+                      origin,
+                      destination,
+                      route_key,
+                      airline,
+                      COUNT(*) AS row_count,
+                      MIN(tax_amount) AS min_tax_amount,
+                      MAX(tax_amount) AS max_tax_amount,
+                      AVG(tax_amount) AS avg_tax_amount,
+                      MAX(tax_amount) - MIN(tax_amount) AS spread_amount,
+                      MAX(captured_at_utc) AS latest_captured_at_utc
+                    FROM {_bq_table("fact_tax_snapshot")}
+                    WHERE cycle_id = @cycle_id
+                      AND tax_amount IS NOT NULL
+                      AND route_key IN UNNEST(@route_keys)
+                      {"AND airline IN UNNEST(@airlines)" if airlines else ""}
+                    GROUP BY origin, destination, route_key, airline
+                    ORDER BY route_key, airline
+                    """,
+                    [
+                        bigquery.ScalarQueryParameter("cycle_id", "STRING", resolved_cycle_id),
+                        bigquery.ArrayQueryParameter("route_keys", "STRING", route_keys),
+                    ]
+                    + (
+                        [bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines))]
+                        if airlines
+                        else []
+                    ),
+                )
+            )
+
+            recent_cycles = get_recent_cycles(None, limit=trend_limit)
+            trend_cycle_ids = [str(item.get("cycle_id") or "") for item in recent_cycles if item.get("cycle_id")]
+            route_trend_rows: list[dict[str, Any]] = []
+            airline_trend_rows: list[dict[str, Any]] = []
+            if trend_cycle_ids:
+                trend_params = [
+                    bigquery.ArrayQueryParameter("cycle_ids", "STRING", trend_cycle_ids),
+                    bigquery.ArrayQueryParameter("route_keys", "STRING", route_keys),
+                ] + (
+                    [bigquery.ArrayQueryParameter("airlines", "STRING", _normalize_codes(airlines))]
+                    if airlines
+                    else []
+                )
+                route_trend_rows = _serialize_warehouse_rows(
+                    _run_bigquery_query(
+                        f"""
+                        SELECT
+                          cycle_id,
+                          origin,
+                          destination,
+                          route_key,
+                          COUNT(*) AS row_count,
+                          COUNT(DISTINCT airline) AS airline_count,
+                          MIN(tax_amount) AS min_tax_amount,
+                          MAX(tax_amount) AS max_tax_amount,
+                          AVG(tax_amount) AS avg_tax_amount,
+                          MAX(tax_amount) - MIN(tax_amount) AS spread_amount
+                        FROM {_bq_table("fact_tax_snapshot")}
+                        WHERE cycle_id IN UNNEST(@cycle_ids)
+                          AND route_key IN UNNEST(@route_keys)
+                          AND tax_amount IS NOT NULL
+                          {"AND airline IN UNNEST(@airlines)" if airlines else ""}
+                        GROUP BY cycle_id, origin, destination, route_key
+                        ORDER BY route_key, cycle_id
+                        """,
+                        trend_params,
+                    )
+                )
+                airline_trend_rows = _serialize_warehouse_rows(
+                    _run_bigquery_query(
+                        f"""
+                        SELECT
+                          cycle_id,
+                          origin,
+                          destination,
+                          route_key,
+                          airline,
+                          COUNT(*) AS row_count,
+                          MIN(tax_amount) AS min_tax_amount,
+                          MAX(tax_amount) AS max_tax_amount,
+                          AVG(tax_amount) AS avg_tax_amount,
+                          MAX(tax_amount) - MIN(tax_amount) AS spread_amount
+                        FROM {_bq_table("fact_tax_snapshot")}
+                        WHERE cycle_id IN UNNEST(@cycle_ids)
+                          AND route_key IN UNNEST(@route_keys)
+                          AND tax_amount IS NOT NULL
+                          {"AND airline IN UNNEST(@airlines)" if airlines else ""}
+                        GROUP BY cycle_id, origin, destination, route_key, airline
+                        ORDER BY route_key, cycle_id, airline
+                        """,
+                        trend_params,
+                    )
+                )
+
+            return _build_tax_monitor_payload(
+                resolved_cycle_id=resolved_cycle_id,
+                detail_rows=rows,
+                route_summaries=route_summaries,
+                airline_summaries=airline_summary_rows,
+                route_trend_rows=route_trend_rows,
+                airline_trend_rows=airline_trend_rows,
+                recent_cycles=recent_cycles,
+            )
         except (GoogleAPIError, RuntimeError, ValueError):
             pass
     resolved_cycle_id = _resolve_cycle_id(session, cycle_id)
     if not resolved_cycle_id:
-        return {"cycle_id": None, "rows": []}
+        return {"cycle_id": None, "rows": [], "route_summaries": [], "airline_summaries": []}
     if session is None:
-        return {"cycle_id": None, "rows": []}
+        return {"cycle_id": None, "rows": [], "route_summaries": [], "airline_summaries": []}
 
-    clauses = ["fo.scrape_id = CAST(:cycle_id AS uuid)", "frm.tax_amount IS NOT NULL"]
-    params: dict[str, Any] = {"cycle_id": resolved_cycle_id, "limit": limit}
-    _apply_in_filter(clauses, params, "fo.airline", airlines, "airline")
-    _apply_in_filter(clauses, params, "fo.origin", origins, "origin")
-    _apply_in_filter(clauses, params, "fo.destination", destinations, "destination")
+    route_clauses = ["fo.scrape_id = CAST(:cycle_id AS uuid)", "frm.tax_amount IS NOT NULL"]
+    route_params: dict[str, Any] = {"cycle_id": resolved_cycle_id}
+    _apply_in_filter(route_clauses, route_params, "fo.airline", airlines, "tax_route_airline")
+    _apply_in_filter(route_clauses, route_params, "fo.origin", origins, "tax_route_origin")
+    _apply_in_filter(route_clauses, route_params, "fo.destination", destinations, "tax_route_destination")
 
-    rows = session.execute(
+    route_summary_rows = session.execute(
+        text(
+            f"""
+            SELECT
+                fo.origin,
+                fo.destination,
+                (fo.origin || '-' || fo.destination) AS route_key,
+                COUNT(*) AS row_count,
+                COUNT(DISTINCT fo.airline) AS airline_count,
+                CAST(MIN(frm.tax_amount) AS NUMERIC(12, 2)) AS min_tax_amount,
+                CAST(MAX(frm.tax_amount) AS NUMERIC(12, 2)) AS max_tax_amount,
+                CAST(AVG(frm.tax_amount) AS NUMERIC(12, 2)) AS avg_tax_amount,
+                CAST(MAX(frm.tax_amount) - MIN(frm.tax_amount) AS NUMERIC(12, 2)) AS spread_amount,
+                MAX(fo.scraped_at) AS latest_captured_at_utc
+            FROM flight_offers fo
+            LEFT JOIN flight_offer_raw_meta frm
+                ON frm.flight_offer_id = fo.id
+            WHERE {' AND '.join(route_clauses)}
+            GROUP BY fo.origin, fo.destination
+            ORDER BY route_key
+            """
+        ),
+        route_params,
+    ).mappings().all()
+    route_summaries = _filter_route_type_records(_annotate_route_records(_rows_to_dicts([dict(row) for row in route_summary_rows])), route_types)
+    if not route_summaries:
+        return {"cycle_id": resolved_cycle_id, "rows": [], "route_summaries": [], "airline_summaries": []}
+
+    route_keys = [str(item["route_key"]) for item in route_summaries]
+    detail_clauses = ["fo.scrape_id = CAST(:cycle_id AS uuid)", "frm.tax_amount IS NOT NULL"]
+    detail_params: dict[str, Any] = {"cycle_id": resolved_cycle_id, "limit": limit}
+    _apply_in_filter(detail_clauses, detail_params, "(fo.origin || '-' || fo.destination)", route_keys, "tax_detail_route")
+    _apply_in_filter(detail_clauses, detail_params, "fo.airline", airlines, "tax_detail_airline")
+
+    detail_rows = session.execute(
         text(
             f"""
             SELECT
@@ -1895,11 +3518,138 @@ def get_taxes(
             FROM flight_offers fo
             LEFT JOIN flight_offer_raw_meta frm
                 ON frm.flight_offer_id = fo.id
-            WHERE {' AND '.join(clauses)}
+            WHERE {' AND '.join(detail_clauses)}
             ORDER BY fo.origin, fo.destination, fo.departure, fo.airline, fo.flight_number
             LIMIT :limit
             """
         ),
-        params,
+        detail_params,
     ).mappings().all()
-    return {"cycle_id": resolved_cycle_id, "rows": _rows_to_dicts([dict(row) for row in rows])}
+
+    airline_filter_values = _normalize_codes(airlines)
+    airline_summary_params = {
+        "cycle_id": resolved_cycle_id,
+        **{f"tax_airline_route_{idx}": value for idx, value in enumerate(route_keys)},
+    }
+    if airline_filter_values:
+        airline_summary_params.update(
+            {f"tax_airline_filter_{idx}": value for idx, value in enumerate(airline_filter_values)}
+        )
+
+    airline_summary_rows = session.execute(
+        text(
+            f"""
+            SELECT
+                fo.origin,
+                fo.destination,
+                (fo.origin || '-' || fo.destination) AS route_key,
+                fo.airline,
+                COUNT(*) AS row_count,
+                CAST(MIN(frm.tax_amount) AS NUMERIC(12, 2)) AS min_tax_amount,
+                CAST(MAX(frm.tax_amount) AS NUMERIC(12, 2)) AS max_tax_amount,
+                CAST(AVG(frm.tax_amount) AS NUMERIC(12, 2)) AS avg_tax_amount,
+                CAST(MAX(frm.tax_amount) - MIN(frm.tax_amount) AS NUMERIC(12, 2)) AS spread_amount,
+                MAX(fo.scraped_at) AS latest_captured_at_utc
+            FROM flight_offers fo
+            LEFT JOIN flight_offer_raw_meta frm
+                ON frm.flight_offer_id = fo.id
+            WHERE fo.scrape_id = CAST(:cycle_id AS uuid)
+              AND frm.tax_amount IS NOT NULL
+              AND (fo.origin || '-' || fo.destination) IN ({', '.join(f':tax_airline_route_{idx}' for idx in range(len(route_keys)))})
+              {"AND fo.airline IN (" + ', '.join(f':tax_airline_filter_{idx}' for idx in range(len(_normalize_codes(airlines)))) + ")" if airlines else ""}
+            GROUP BY fo.origin, fo.destination, fo.airline
+            ORDER BY route_key, fo.airline
+            """
+        ),
+        airline_summary_params,
+    ).mappings().all()
+
+    recent_cycles = get_recent_cycles(session, limit=trend_limit)
+    trend_cycle_ids = [str(item.get("cycle_id") or "") for item in recent_cycles if item.get("cycle_id")]
+    route_trend_rows: list[dict[str, Any]] = []
+    airline_trend_rows: list[dict[str, Any]] = []
+    if trend_cycle_ids:
+        cycle_placeholders = ", ".join(f":tax_cycle_{idx}" for idx in range(len(trend_cycle_ids)))
+        route_placeholders = ", ".join(f":tax_route_{idx}" for idx in range(len(route_keys)))
+        trend_params = {
+            **{f"tax_cycle_{idx}": value for idx, value in enumerate(trend_cycle_ids)},
+            **{f"tax_route_{idx}": value for idx, value in enumerate(route_keys)},
+        }
+        if airline_filter_values:
+            trend_params.update(
+                {f"tax_trend_airline_{idx}": value for idx, value in enumerate(airline_filter_values)}
+            )
+        route_trend_rows = _rows_to_dicts(
+            [
+                dict(row)
+                for row in session.execute(
+                    text(
+                        f"""
+                        SELECT
+                            fo.scrape_id::text AS cycle_id,
+                            fo.origin,
+                            fo.destination,
+                            (fo.origin || '-' || fo.destination) AS route_key,
+                            COUNT(*) AS row_count,
+                            COUNT(DISTINCT fo.airline) AS airline_count,
+                            CAST(MIN(frm.tax_amount) AS NUMERIC(12, 2)) AS min_tax_amount,
+                            CAST(MAX(frm.tax_amount) AS NUMERIC(12, 2)) AS max_tax_amount,
+                            CAST(AVG(frm.tax_amount) AS NUMERIC(12, 2)) AS avg_tax_amount,
+                            CAST(MAX(frm.tax_amount) - MIN(frm.tax_amount) AS NUMERIC(12, 2)) AS spread_amount
+                        FROM flight_offers fo
+                        LEFT JOIN flight_offer_raw_meta frm
+                            ON frm.flight_offer_id = fo.id
+                        WHERE fo.scrape_id::text IN ({cycle_placeholders})
+                          AND frm.tax_amount IS NOT NULL
+                          AND (fo.origin || '-' || fo.destination) IN ({route_placeholders})
+                          {"AND fo.airline IN (" + ', '.join(f':tax_trend_airline_{idx}' for idx in range(len(_normalize_codes(airlines)))) + ")" if airlines else ""}
+                        GROUP BY fo.scrape_id, fo.origin, fo.destination
+                        ORDER BY route_key, cycle_id
+                        """
+                    ),
+                    trend_params,
+                ).mappings().all()
+            ]
+        )
+        airline_trend_rows = _rows_to_dicts(
+            [
+                dict(row)
+                for row in session.execute(
+                    text(
+                        f"""
+                        SELECT
+                            fo.scrape_id::text AS cycle_id,
+                            fo.origin,
+                            fo.destination,
+                            (fo.origin || '-' || fo.destination) AS route_key,
+                            fo.airline,
+                            COUNT(*) AS row_count,
+                            CAST(MIN(frm.tax_amount) AS NUMERIC(12, 2)) AS min_tax_amount,
+                            CAST(MAX(frm.tax_amount) AS NUMERIC(12, 2)) AS max_tax_amount,
+                            CAST(AVG(frm.tax_amount) AS NUMERIC(12, 2)) AS avg_tax_amount,
+                            CAST(MAX(frm.tax_amount) - MIN(frm.tax_amount) AS NUMERIC(12, 2)) AS spread_amount
+                        FROM flight_offers fo
+                        LEFT JOIN flight_offer_raw_meta frm
+                            ON frm.flight_offer_id = fo.id
+                        WHERE fo.scrape_id::text IN ({cycle_placeholders})
+                          AND frm.tax_amount IS NOT NULL
+                          AND (fo.origin || '-' || fo.destination) IN ({route_placeholders})
+                          {"AND fo.airline IN (" + ', '.join(f':tax_trend_airline_{idx}' for idx in range(len(_normalize_codes(airlines)))) + ")" if airlines else ""}
+                        GROUP BY fo.scrape_id, fo.origin, fo.destination, fo.airline
+                        ORDER BY route_key, cycle_id, fo.airline
+                        """
+                    ),
+                    trend_params,
+                ).mappings().all()
+            ]
+        )
+
+    return _build_tax_monitor_payload(
+        resolved_cycle_id=resolved_cycle_id,
+        detail_rows=_rows_to_dicts([dict(row) for row in detail_rows]),
+        route_summaries=route_summaries,
+        airline_summaries=_rows_to_dicts([dict(row) for row in airline_summary_rows]),
+        route_trend_rows=route_trend_rows,
+        airline_trend_rows=airline_trend_rows,
+        recent_cycles=recent_cycles,
+    )

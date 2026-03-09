@@ -105,6 +105,11 @@ a {
   background: rgba(255, 255, 255, 0.56);
 }
 
+.nav-link[data-active="true"] {
+  font-weight: 700;
+  box-shadow: inset 0 -2px 0 rgba(16, 35, 59, 0.14);
+}
+
 .page {
   padding: 32px 0 64px;
 }
@@ -478,6 +483,50 @@ a {
   font-size: 0.82rem;
 }
 
+.route-inline-meta,
+.route-report-title-meta {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.route-type-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(16, 35, 59, 0.12);
+  background: rgba(16, 35, 59, 0.06);
+  color: var(--ink);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.route-type-pill[data-type="DOM"] {
+  background: rgba(29, 138, 99, 0.12);
+  border-color: rgba(29, 138, 99, 0.16);
+  color: var(--good);
+}
+
+.route-type-pill[data-type="INT"] {
+  background: rgba(28, 95, 134, 0.12);
+  border-color: rgba(28, 95, 134, 0.16);
+  color: #0f5b84;
+}
+
+.route-type-pill[data-type="UNK"] {
+  color: var(--muted);
+}
+
+.route-geo {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .long-text {
   min-width: 320px;
   color: var(--muted);
@@ -586,6 +635,134 @@ a {
 .report-monitor {
   display: grid;
   gap: 18px;
+}
+
+.changes-grid {
+  align-items: start;
+}
+
+.changes-summary-stack {
+  display: grid;
+  gap: 16px;
+}
+
+.changes-trend-list {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(16, 35, 59, 0.08);
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.changes-trend-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) 110px 110px;
+  gap: 12px;
+  align-items: center;
+  font-size: 0.88rem;
+  color: var(--muted);
+}
+
+.changes-trend-row strong {
+  color: var(--ink);
+}
+
+.changes-trend-bar-track {
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(16, 35, 59, 0.08);
+}
+
+.changes-trend-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(17, 96, 145, 0.85), rgba(82, 170, 186, 0.9));
+}
+
+.changes-summary-grid {
+  display: grid;
+  gap: 14px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.changes-callout-row {
+  margin-bottom: 14px;
+}
+
+.change-summary-chip {
+  justify-content: flex-start;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.change-table {
+  min-width: 1560px;
+}
+
+.sticky-change-col {
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  min-width: 150px;
+  background: rgba(247, 243, 235, 0.96);
+}
+
+.change-table thead .sticky-change-col {
+  z-index: 5;
+}
+
+.sticky-change-col.second {
+  left: 150px;
+  min-width: 160px;
+}
+
+.sticky-change-col.third {
+  left: 310px;
+  min-width: 90px;
+}
+
+.sticky-change-col.fourth {
+  left: 400px;
+  min-width: 140px;
+}
+
+.change-table-meta {
+  background: rgba(252, 249, 242, 0.98);
+}
+
+.change-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(16, 35, 59, 0.1);
+  background: rgba(16, 35, 59, 0.06);
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.change-pill.direction-up {
+  background: rgba(29, 138, 99, 0.12);
+  color: var(--good);
+  border-color: rgba(29, 138, 99, 0.16);
+}
+
+.change-pill.direction-down {
+  background: rgba(183, 54, 50, 0.12);
+  color: var(--alert);
+  border-color: rgba(183, 54, 50, 0.16);
+}
+
+.change-pill.direction-none,
+.change-pill.direction-neutral {
+  background: rgba(16, 35, 59, 0.06);
+  color: var(--muted);
 }
 
 .report-toolbar {
@@ -731,6 +908,50 @@ a {
   gap: 18px;
 }
 
+.route-report-stack.nested {
+  padding: 14px;
+}
+
+.roundtrip-route-shell {
+  display: grid;
+  gap: 10px;
+  border: 1px solid rgba(16, 35, 59, 0.1);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(232, 240, 245, 0.9), rgba(247, 243, 235, 0.92));
+  box-shadow: 0 16px 34px rgba(16, 35, 59, 0.08);
+}
+
+.roundtrip-route-shell.single {
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.roundtrip-route-header {
+  padding: 16px 18px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.roundtrip-route-header strong {
+  display: block;
+  color: var(--ink);
+  font-size: 1.1rem;
+}
+
+.roundtrip-route-header span {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.roundtrip-route-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .route-report-block {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -748,10 +969,27 @@ a {
 
 .route-report-title {
   padding: 16px 12px;
-  font-size: 1.9rem;
-  font-weight: 900;
+  display: grid;
+  gap: 8px;
   background: #ffffff;
   border-right: 2px solid rgba(16, 35, 59, 0.16);
+}
+
+.route-report-title strong {
+  font-size: 1.9rem;
+  font-weight: 900;
+}
+
+.trip-leg-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(17, 96, 145, 0.12);
+  color: #155277;
+  font-size: 0.76rem;
+  font-weight: 800;
 }
 
 .route-report-leader {
@@ -789,6 +1027,16 @@ a {
 .leader-dates {
   color: #365871;
   font-size: 0.92rem;
+}
+
+.flight-subband-stack {
+  display: grid;
+  gap: 2px;
+}
+
+.flight-subband-stack span:last-child {
+  font-size: 0.72rem;
+  opacity: 0.88;
 }
 
 .route-report-scroll {
@@ -1019,9 +1267,74 @@ a {
   font-weight: 700;
 }
 
+.operations-summary-grid {
+  margin-bottom: 18px;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.operations-stat {
+  padding: 16px 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.operations-stat span {
+  color: var(--muted);
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.operations-stat strong {
+  font-size: 1.2rem;
+}
+
+.operations-stat small {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.operations-grid {
+  margin-top: 0;
+  margin-bottom: 18px;
+  align-items: start;
+}
+
+.operations-weekday-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+}
+
+.operations-weekday-card {
+  padding: 16px 14px;
+  display: grid;
+  gap: 6px;
+  text-align: center;
+}
+
+.operations-weekday-card span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.operations-weekday-card strong {
+  font-size: 1.35rem;
+}
+
+.operations-weekday-card small {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 @media (max-width: 1100px) {
   .grid.cards,
-  .section-grid {
+  .section-grid,
+  .operations-summary-grid {
     grid-template-columns: 1fr 1fr;
   }
 }
@@ -1033,14 +1346,18 @@ a {
   }
 
   .grid.cards,
-  .section-grid {
+  .section-grid,
+  .operations-summary-grid {
     grid-template-columns: 1fr;
   }
 
   .route-report-title-row,
+  .roundtrip-route-header,
   .report-toolbar-row,
   .report-toolbar-meta,
   .route-scope-grid,
+  .changes-trend-row,
+  .changes-summary-grid,
   .forecast-banner,
   .forecast-grid,
   .forecast-grid-split {

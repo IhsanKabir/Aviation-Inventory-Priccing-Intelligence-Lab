@@ -1,16 +1,29 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 
 const NAV_ITEMS = [
   { href: "/", label: "Overview" },
   { href: "/health", label: "Health" },
   { href: "/routes", label: "Routes" },
+  { href: "/operations", label: "Operations" },
   { href: "/penalties", label: "Penalties" },
   { href: "/taxes", label: "Taxes" },
   { href: "/changes", label: "Changes" },
   { href: "/forecasting", label: "Forecasting" }
 ];
 
-export function Topbar({ pathname }: { pathname: string }) {
+function isActivePath(pathname: string, href: string) {
+  if (href === "/") {
+    return pathname === "/";
+  }
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
+export function Topbar() {
+  const pathname = usePathname() || "/";
+
   return (
     <div className="topbar">
       <div className="shell topbar-inner">
@@ -19,7 +32,7 @@ export function Topbar({ pathname }: { pathname: string }) {
           <div>
             <div className="brand-title">Aero Pulse Intelligence Monitor</div>
             <div className="brand-subtitle">
-              Hosted route, change, tax, penalty, and forecasting monitor
+              Hosted route, operations, change, tax, penalty, and forecasting monitor
             </div>
           </div>
         </div>
@@ -29,7 +42,7 @@ export function Topbar({ pathname }: { pathname: string }) {
               key={item.href}
               className="nav-link"
               href={item.href}
-              data-active={pathname === item.href}
+              data-active={isActivePath(pathname, item.href)}
             >
               {item.label}
             </Link>

@@ -41,12 +41,29 @@ def build_payload(
     adt: int = 1,
     chd: int = 0,
     inf: int = 0,
+    trip_type: str = "OW",
+    return_date: str | None = None,
 ):
     passengers = {"ADT": max(1, int(adt or 1))}
     if int(chd or 0) > 0:
         passengers["CHD"] = int(chd)
     if int(inf or 0) > 0:
         passengers["INF"] = int(inf)
+    itinerary_parts = [
+        {
+            "from": {"useNearbyLocations": False, "code": origin},
+            "to": {"useNearbyLocations": False, "code": destination},
+            "when": {"date": date},
+        }
+    ]
+    if str(trip_type or "OW").strip().upper() in {"RT", "ROUNDTRIP", "ROUND_TRIP"} and return_date:
+        itinerary_parts.append(
+            {
+                "from": {"useNearbyLocations": False, "code": destination},
+                "to": {"useNearbyLocations": False, "code": origin},
+                "when": {"date": return_date},
+            }
+        )
     return {
         "operationName": "bookingAirSearch",
         "query": """
@@ -64,13 +81,7 @@ def build_payload(
                 "promoCodes": [""],
                 "searchType": "BRANDED",
                 "passengers": passengers,
-                "itineraryParts": [
-                    {
-                        "from": {"useNearbyLocations": False, "code": origin},
-                        "to": {"useNearbyLocations": False, "code": destination},
-                        "when": {"date": date},
-                    }
-                ],
+                "itineraryParts": itinerary_parts,
                 "pointOfSale": "BD",
             }
         },
@@ -156,12 +167,24 @@ def biman_search(
     adt: int = 1,
     chd: int = 0,
     inf: int = 0,
+    trip_type: str = "OW",
+    return_date: str | None = None,
     cookies_path: str = None,
     verbose: bool = False,
     debug: bool = False,
 ):
     req = Requester(cookies_path=cookies_path)
-    payload = build_payload(origin, dest, date, cabin, adt=adt, chd=chd, inf=inf)
+    payload = build_payload(
+        origin,
+        dest,
+        date,
+        cabin,
+        adt=adt,
+        chd=chd,
+        inf=inf,
+        trip_type=trip_type,
+        return_date=return_date,
+    )
 
     if debug:
         with open("inspect_payload.json", "w", encoding="utf-8") as fh:
@@ -203,12 +226,25 @@ def fetch_flights(
     adt: int = 1,
     chd: int = 0,
     inf: int = 0,
+    trip_type: str = "OW",
+    return_date: str | None = None,
 ):
     """
     MUST return a dict with keys:
     { raw, originalResponse, rows, ok }
     """
-    return biman_search(origin, destination, date, cabin=cabin, adt=adt, chd=chd, inf=inf, verbose=False)
+    return biman_search(
+        origin,
+        destination,
+        date,
+        cabin=cabin,
+        adt=adt,
+        chd=chd,
+        inf=inf,
+        trip_type=trip_type,
+        return_date=return_date,
+        verbose=False,
+    )
 
 
 def cli_main():
@@ -220,6 +256,8 @@ def cli_main():
     parser.add_argument("--adt", type=int, default=1)
     parser.add_argument("--chd", type=int, default=0)
     parser.add_argument("--inf", type=int, default=0)
+    parser.add_argument("--trip-type", default="OW")
+    parser.add_argument("--return-date", default=None)
     parser.add_argument("--cookies", default=None)
     parser.add_argument("--verbose", action="store_true")
     parser.add_argument("--debug", action="store_true")
@@ -233,6 +271,8 @@ def cli_main():
         adt=args.adt,
         chd=args.chd,
         inf=args.inf,
+        trip_type=args.trip_type,
+        return_date=args.return_date,
         cookies_path=args.cookies,
         verbose=args.verbose,
         debug=args.debug,
