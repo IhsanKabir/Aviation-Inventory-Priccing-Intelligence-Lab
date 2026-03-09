@@ -31,7 +31,8 @@
    - `AirlineIntel_MaintenancePulse`
    - `AirlineIntel_Ingestion4H`
    - `AirlineIntel_IngestionOnLogon`
-   - Current default ingestion cadence is every 6 hours (`RepeatMinutes=360`).
+  - Current default ingestion cadence is every 6 hours (`RepeatMinutes=360`).
+  - Ingestion launch policy is sequential: never start a new cycle while an active/fresh accumulation exists, and enforce a 30 minute buffer after the last completed accumulation.
 
 ## Exact Verification Commands
 
@@ -80,6 +81,33 @@ schtasks /Query /TN AirlineIntel_IngestionOnLogon /FO LIST /V | findstr /I /C:"S
   - Drift groups reviewed when status is WARN/FAIL
 - `system_status_latest.md` points to current-day `ops_health_*` file.
 - Pulse task repeats every 30 minutes.
+- Ingestion wrapper skips launches when:
+  - a pipeline process is still active
+  - heartbeat state is still `running` and fresh
+  - the last completed accumulation is less than 30 minutes old
+
+## Current Runtime Baseline
+
+Observed on Monday, March 9, 2026:
+
+- Accumulation runtime:
+  - `3cef2491...` started `2026-03-09 12:45 UTC`
+  - completed `2026-03-09 17:16 UTC`
+  - duration: about `4h 31m`
+- Post-accumulation runtime:
+  - prediction: about `3m`
+  - BigQuery sync: about `3.5m`
+- Operational conclusion:
+  - the main bottleneck is accumulation/search time, not reporting, prediction, or warehouse sync
+  - round-trip search was not active in this baseline (`trip_type=OW`)
+
+Immediate runtime-reduction priorities:
+
+1. Prevent overlap and duplicate work first.
+2. Use `run_all.py --profile-runtime` to identify slow airline/route/date segments.
+3. Use `tools/parallel_airline_runner.py` conservatively for safe airline-level parallelism.
+4. Keep prediction and sync enabled; they are not the primary runtime cost.
+5. Only expand round-trip coverage after one-way baseline runtime is under control.
 
 ## If Daily Ops File Did Not Update
 

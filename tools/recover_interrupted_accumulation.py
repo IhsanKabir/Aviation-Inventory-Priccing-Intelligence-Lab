@@ -53,6 +53,12 @@ def parse_args():
         default=60.0,
         help="Minimum time between recovery launch attempts",
     )
+    p.add_argument(
+        "--min-completed-gap-minutes",
+        type=float,
+        default=30.0,
+        help="Minimum buffer after a completed accumulation before another cycle may start",
+    )
     p.add_argument("--dry-run", action="store_true")
     return p.parse_args()
 
@@ -137,6 +143,20 @@ def _heartbeat_age_minutes(payload: dict) -> float | None:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=dt.timezone.utc)
     return max(0.0, (_now_utc() - ts.astimezone(dt.timezone.utc)).total_seconds() / 60.0)
+
+
+def _heartbeat_state(payload: dict) -> str:
+    return str((payload or {}).get("state") or "").strip().lower()
+
+
+def _heartbeat_running_recent(payload: dict, stale_minutes: float) -> bool:
+    age = _heartbeat_age_minutes(payload)
+    return _heartbeat_state(payload) == "running" and age is not None and age < float(stale_minutes)
+
+
+def _heartbeat_completed_recent(payload: dict, min_completed_gap_minutes: float) -> bool:
+    age = _heartbeat_age_minutes(payload)
+    return _heartbeat_state(payload) == "completed" and age is not None and age < float(min_completed_gap_minutes)
 
 
 def _list_relevant_processes() -> list[dict]:
@@ -309,7 +329,7 @@ def _build_status(
     }
 
 
-def _handle_preflight(root: Path, reports_dir: Path, status_file: Path, state_file: Path, output_file: Path) -> int:
+def _handle_preflight(args, root: Path, reports_dir: Path, status_file: Path, state_file: Path, output_file: Path) -> int:
     active = _active_pipeline_processes()
     heartbeat = _read_json(status_file)
     if active:
@@ -327,6 +347,36 @@ def _handle_preflight(root: Path, reports_dir: Path, status_file: Path, state_fi
         _write_json(output_file, payload)
         print(json.dumps(payload, ensure_ascii=False))
         return 10
+    if _heartbeat_running_recent(heartbeat, stale_minutes=args.stale_minutes):
+        payload = _build_status(
+            mode="preflight",
+            root=root,
+            reports_dir=reports_dir,
+            status_file=status_file,
+            state_file=state_file,
+            active_procs=[],
+            heartbeat=heartbeat,
+            action="skip",
+            reason="fresh_running_heartbeat",
+        )
+        _write_json(output_file, payload)
+        print(json.dumps(payload, ensure_ascii=False))
+        return 10
+    if _heartbeat_completed_recent(heartbeat, min_completed_gap_minutes=args.min_completed_gap_minutes):
+        payload = _build_status(
+            mode="preflight",
+            root=root,
+            reports_dir=reports_dir,
+            status_file=status_file,
+            state_file=state_file,
+            active_procs=[],
+            heartbeat=heartbeat,
+            action="skip",
+            reason="completed_buffer_active",
+        )
+        _write_json(output_file, payload)
+        print(json.dumps(payload, ensure_ascii=False))
+        return 11
     payload = _build_status(
         mode="preflight",
         root=root,
@@ -364,8 +414,38 @@ def _handle_recover(args, root: Path, reports_dir: Path, status_file: Path, stat
         print(json.dumps(payload, ensure_ascii=False))
         return 0
 
-    hb_state = str(heartbeat.get("state") or "").lower() if heartbeat else ""
+    hb_state = _heartbeat_state(heartbeat) if heartbeat else ""
     hb_age = _heartbeat_age_minutes(heartbeat) if heartbeat else None
+    if _heartbeat_running_recent(heartbeat, args.stale_minutes):
+        payload = _build_status(
+            mode="recover",
+            root=root,
+            reports_dir=reports_dir,
+            status_file=status_file,
+            state_file=state_file,
+            active_procs=[],
+            heartbeat=heartbeat,
+            action="none",
+            reason="fresh_running_heartbeat",
+        )
+        _write_json(output_file, payload)
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
+    if _heartbeat_completed_recent(heartbeat, args.min_completed_gap_minutes):
+        payload = _build_status(
+            mode="recover",
+            root=root,
+            reports_dir=reports_dir,
+            status_file=status_file,
+            state_file=state_file,
+            active_procs=[],
+            heartbeat=heartbeat,
+            action="none",
+            reason="completed_buffer_active",
+        )
+        _write_json(output_file, payload)
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
     stale_running = hb_state == "running" and hb_age is not None and hb_age >= float(args.stale_minutes)
     idle_too_long = hb_age is not None and hb_age >= float(args.max_idle_minutes)
     no_heartbeat = not heartbeat
@@ -440,7 +520,7 @@ def main():
     output_file = _output_path(args, reports_dir)
 
     if args.mode == "preflight":
-        return _handle_preflight(root, reports_dir, status_file, state_file, output_file)
+        return _handle_preflight(args, root, reports_dir, status_file, state_file, output_file)
     return _handle_recover(args, root, reports_dir, status_file, state_file, output_file)
 
 

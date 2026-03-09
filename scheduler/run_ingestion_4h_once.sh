@@ -51,7 +51,11 @@ if [[ -f "$RECOVERY_HELPER" ]]; then
   set -e
 
   if [[ "$PRE_RC" -eq 10 ]]; then
-    echo "[$(timestamp)] ingestion cycle skipped: accumulation pipeline already running" >> "$LOGFILE"
+    echo "[$(timestamp)] ingestion cycle skipped: active or fresh accumulation already present" >> "$LOGFILE"
+    exit 0
+  fi
+  if [[ "$PRE_RC" -eq 11 ]]; then
+    echo "[$(timestamp)] ingestion cycle skipped: 30 minute post-completion buffer is active" >> "$LOGFILE"
     exit 0
   fi
   if [[ "$PRE_RC" -ne 0 ]]; then

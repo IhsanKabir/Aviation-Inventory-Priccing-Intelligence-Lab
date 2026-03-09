@@ -49,6 +49,9 @@ Target: implement as much as possible in parallel, but execute in phases when ne
 ### Collection Frequency
 
 - Target every 3-4 hours (adaptive by actual runtime/load)
+- Scheduler launch policy is sequential, not overlapping:
+  - do not start a new ingestion cycle while an active/fresh accumulation exists
+  - enforce a 30 minute buffer after a completed accumulation before the next launch
 
 ### Required Data Fields
 
@@ -87,6 +90,7 @@ Mandatory for analysis (minimum set):
 - Store round-trip request and leg-link metadata in raw meta first
 - Expose outbound/inbound pairing through `trip_request_id` plus leg direction/sequence
 - Upgrade connectors incrementally instead of forcing an all-at-once migration
+- Keep the baseline scheduled cycle one-way-first unless runtime headroom is acceptable; observed March 9, 2026 runtime overrun was already present on `OW` search, so round-trip is not the current root cause of cycle overrun
 
 ### Reporting
 

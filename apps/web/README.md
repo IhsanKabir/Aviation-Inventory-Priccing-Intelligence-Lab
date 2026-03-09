@@ -10,6 +10,7 @@ Active scope, UX requirements, and delivery priorities are tracked in [../../doc
 - React
 - TypeScript
 - API-first data access through the FastAPI reporting layer
+- Vercel Analytics via `@vercel/analytics/next` in the root layout
 
 ## Local Run
 

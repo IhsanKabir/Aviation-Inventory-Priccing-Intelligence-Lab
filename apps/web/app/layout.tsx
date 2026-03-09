@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Space_Grotesk, IBM_Plex_Mono } from "next/font/google";
+import { Analytics } from "@vercel/analytics/next";
 
 import "./globals.css";
 
@@ -31,6 +32,7 @@ export default async function RootLayout({
       <body style={{ fontFamily: "var(--font-display)" }}>
         <Topbar />
         <main className="page shell">{children}</main>
+        <Analytics />
       </body>
     </html>
   );

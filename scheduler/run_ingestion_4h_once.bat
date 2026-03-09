@@ -1,5 +1,5 @@
 @echo off
-setlocal
+setlocal EnableDelayedExpansion
 set "ROOT=%~dp0.."
 if not exist "%ROOT%\logs" mkdir "%ROOT%\logs"
 if not exist "%ROOT%\output\reports" mkdir "%ROOT%\output\reports"
@@ -35,17 +35,21 @@ if defined BIGQUERY_PROJECT_ID if defined BIGQUERY_DATASET if not defined GOOGLE
 if exist "%RECOVERY_HELPER%" (
   "%PYEXE%" "%RECOVERY_HELPER%" --mode preflight --python-exe "%PYEXE%" --root "%ROOT%" --reports-dir "%ROOT%\output\reports" >> "%LOGFILE%" 2>&1
   set "PRE_RC=%ERRORLEVEL%"
-  if "%PRE_RC%"=="10" (
-    echo [%date% %time%] ingestion cycle skipped: accumulation pipeline already running>> "%LOGFILE%"
+  if "!PRE_RC!"=="10" (
+    echo [%date% %time%] ingestion cycle skipped: active or fresh accumulation already present>> "%LOGFILE%"
     exit /b 0
   )
-  if not "%PRE_RC%"=="0" (
-    echo [%date% %time%] ingestion preflight warning rc=%PRE_RC% (continuing)>> "%LOGFILE%"
+  if "!PRE_RC!"=="11" (
+    echo [%date% %time%] ingestion cycle skipped: 30 minute post-completion buffer is active>> "%LOGFILE%"
+    exit /b 0
+  )
+  if not "!PRE_RC!"=="0" (
+    echo [%date% %time%] ingestion preflight warning rc=!PRE_RC! (continuing)>> "%LOGFILE%"
   )
 )
 
 echo [%date% %time%] starting ingestion cycle>> "%LOGFILE%"
 "%PYEXE%" "%ROOT%\run_pipeline.py" --python-exe "%PYEXE%" --skip-reports --report-output-dir "%ROOT%\output\reports" --report-timestamp-tz local >> "%LOGFILE%" 2>&1
 set "RC=%ERRORLEVEL%"
-echo [%date% %time%] ingestion cycle finished rc=%RC%>> "%LOGFILE%"
-exit /b %RC%
+echo [%date% %time%] ingestion cycle finished rc=!RC!>> "%LOGFILE%"
+exit /b !RC!
