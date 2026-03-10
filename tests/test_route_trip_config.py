@@ -3,10 +3,12 @@ import unittest
 from datetime import date
 from pathlib import Path
 from uuid import uuid4
+from unittest.mock import patch
 
 from core.trip_config import (
     load_route_trip_overrides,
     match_route_trip_override,
+    match_route_trip_overrides,
     resolve_route_trip_plan,
 )
 
@@ -108,6 +110,340 @@ class RouteTripConfigTests(unittest.TestCase):
         self.assertEqual([1, 2, 3], first["return_offsets"])
         self.assertEqual("OW", second["trip_type"])
 
+    def test_load_route_trip_overrides_supports_market_trip_profiles(self):
+        payload = {
+            "routes": [
+                {
+                    "airline": "BS",
+                    "route": "DAC-JED",
+                    "market_trip_profile": "labor_me_rt",
+                }
+            ]
+        }
+        priors = {
+            "trip_date_profiles": {
+                "labor_me_rt": {
+                    "trip_type": "RT",
+                    "day_offsets": [7, 14, 21],
+                    "return_date_offsets": [7, 14, 21],
+                }
+            }
+        }
+        temp_dir = Path("output/test_tmp")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        path = temp_dir / f"route_trip_windows_{uuid4().hex}.json"
+        try:
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with patch("core.trip_config.load_market_priors", return_value=priors):
+                overrides = load_route_trip_overrides(path, today=date(2026, 3, 10))
+        finally:
+            if path.exists():
+                path.unlink()
+
+        self.assertEqual(1, len(overrides))
+        self.assertEqual("RT", overrides[0]["trip_type"])
+        self.assertEqual(["2026-03-17", "2026-03-24", "2026-03-31"], overrides[0]["outbound_dates"])
+        self.assertEqual([7, 14, 21], overrides[0]["return_offsets"])
+
+    def test_load_route_trip_overrides_supports_market_trip_profiles_with_offset_ranges(self):
+        payload = {
+            "routes": [
+                {
+                    "airline": "BS",
+                    "route": "DAC-JED",
+                    "market_trip_profile": "worker_visa_outbound_to_middle_east_one_way",
+                }
+            ]
+        }
+        priors = {
+            "trip_date_profiles": {
+                "worker_visa_outbound_to_middle_east_one_way": {
+                    "trip_type": "OW",
+                    "day_offset_ranges": [{"start": 7, "end": 10}],
+                }
+            }
+        }
+        temp_dir = Path("output/test_tmp")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        path = temp_dir / f"route_trip_windows_{uuid4().hex}.json"
+        try:
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with patch("core.trip_config.load_market_priors", return_value=priors):
+                overrides = load_route_trip_overrides(path, today=date(2026, 3, 10))
+        finally:
+            if path.exists():
+                path.unlink()
+
+        self.assertEqual(1, len(overrides))
+        self.assertEqual("OW", overrides[0]["trip_type"])
+        self.assertEqual(
+            ["2026-03-17", "2026-03-18", "2026-03-19", "2026-03-20"],
+            overrides[0]["outbound_dates"],
+        )
+
+    def test_load_route_trip_overrides_supports_market_trip_profiles_with_date_ranges(self):
+        payload = {
+            "routes": [
+                {
+                    "airline": "BG",
+                    "route": "DAC-CXB",
+                    "market_trip_profile": "bangladesh_domestic_eid_round_trip_2026",
+                }
+            ]
+        }
+        priors = {
+            "trip_date_profiles": {
+                "bangladesh_domestic_eid_round_trip_2026": {
+                    "trip_type": "RT",
+                    "date_ranges": [{"start": "2026-03-11", "end": "2026-03-20"}],
+                    "return_date_ranges": [{"start": "2026-03-20", "end": "2026-03-30"}],
+                }
+            }
+        }
+        temp_dir = Path("output/test_tmp")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        path = temp_dir / f"route_trip_windows_{uuid4().hex}.json"
+        try:
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with patch("core.trip_config.load_market_priors", return_value=priors):
+                overrides = load_route_trip_overrides(path, today=date(2026, 3, 10))
+        finally:
+            if path.exists():
+                path.unlink()
+
+        self.assertEqual(1, len(overrides))
+        self.assertEqual("RT", overrides[0]["trip_type"])
+        self.assertEqual("2026-03-11", overrides[0]["outbound_dates"][0])
+        self.assertEqual("2026-03-20", overrides[0]["outbound_dates"][-1])
+        self.assertEqual("2026-03-20", overrides[0]["return_dates"][0])
+        self.assertEqual("2026-03-30", overrides[0]["return_dates"][-1])
+
+    def test_load_route_trip_overrides_supports_multiple_market_trip_profiles(self):
+        payload = {
+            "routes": [
+                {
+                    "airline": "BG",
+                    "route": "DAC-CXB",
+                    "market_trip_profiles": [
+                        "bangladesh_domestic_round_trip_short",
+                        "bangladesh_domestic_eid_round_trip_2026",
+                    ],
+                }
+            ]
+        }
+        priors = {
+            "trip_date_profiles": {
+                "bangladesh_domestic_round_trip_short": {
+                    "trip_type": "RT",
+                    "return_date_offsets": [2],
+                },
+                "bangladesh_domestic_eid_round_trip_2026": {
+                    "trip_type": "RT",
+                    "date_ranges": [{"start": "2026-03-11", "end": "2026-03-20"}],
+                    "return_date_ranges": [{"start": "2026-03-20", "end": "2026-03-30"}],
+                },
+            }
+        }
+        temp_dir = Path("output/test_tmp")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        path = temp_dir / f"route_trip_windows_{uuid4().hex}.json"
+        try:
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with patch("core.trip_config.load_market_priors", return_value=priors):
+                overrides = load_route_trip_overrides(path, today=date(2026, 3, 10))
+        finally:
+            if path.exists():
+                path.unlink()
+
+        self.assertEqual(2, len(overrides))
+        matches = match_route_trip_overrides(overrides, airline="BG", origin="DAC", destination="CXB")
+        self.assertEqual(2, len(matches))
+        self.assertEqual([2], matches[0]["return_offsets"])
+        self.assertEqual("2026-03-11", matches[1]["outbound_dates"][0])
+
+    def test_load_route_trip_overrides_supports_directional_eid_one_way_profile(self):
+        payload = {
+            "routes": [
+                {
+                    "airline": "BG",
+                    "route": "DAC-CXB",
+                    "market_trip_profiles": [
+                        "bangladesh_domestic_round_trip_short",
+                        "bangladesh_domestic_eid_round_trip_2026",
+                        "bangladesh_domestic_eid_capital_outbound_one_way_2026",
+                    ],
+                }
+            ]
+        }
+        priors = {
+            "trip_date_profiles": {
+                "bangladesh_domestic_round_trip_short": {
+                    "trip_type": "RT",
+                    "return_date_offsets": [2],
+                },
+                "bangladesh_domestic_eid_round_trip_2026": {
+                    "trip_type": "RT",
+                    "date_ranges": [{"start": "2026-03-11", "end": "2026-03-20"}],
+                    "return_date_ranges": [{"start": "2026-03-20", "end": "2026-03-30"}],
+                },
+                "bangladesh_domestic_eid_capital_outbound_one_way_2026": {
+                    "trip_type": "OW",
+                    "date_ranges": [{"start": "2026-03-11", "end": "2026-03-20"}],
+                },
+            }
+        }
+        temp_dir = Path("output/test_tmp")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        path = temp_dir / f"route_trip_windows_{uuid4().hex}.json"
+        try:
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with patch("core.trip_config.load_market_priors", return_value=priors):
+                overrides = load_route_trip_overrides(path, today=date(2026, 3, 10))
+        finally:
+            if path.exists():
+                path.unlink()
+
+        self.assertEqual(3, len(overrides))
+        matches = match_route_trip_overrides(overrides, airline="BG", origin="DAC", destination="CXB")
+        self.assertEqual(3, len(matches))
+        self.assertEqual(["RT", "RT", "OW"], [m["trip_type"] for m in matches])
+
+    def test_load_route_trip_overrides_can_limit_active_market_trip_profiles(self):
+        payload = {
+            "routes": [
+                {
+                    "airline": "BG",
+                    "route": "DAC-CXB",
+                    "market_trip_profiles": [
+                        "bangladesh_domestic_round_trip_short",
+                        "bangladesh_domestic_eid_round_trip_2026",
+                        "bangladesh_domestic_eid_capital_outbound_one_way_2026",
+                    ],
+                    "active_market_trip_profiles": [
+                        "bangladesh_domestic_round_trip_short",
+                    ],
+                }
+            ]
+        }
+        priors = {
+            "trip_date_profiles": {
+                "bangladesh_domestic_round_trip_short": {
+                    "trip_type": "RT",
+                    "return_date_offsets": [2],
+                },
+                "bangladesh_domestic_eid_round_trip_2026": {
+                    "trip_type": "RT",
+                    "date_ranges": [{"start": "2026-03-11", "end": "2026-03-20"}],
+                    "return_date_ranges": [{"start": "2026-03-20", "end": "2026-03-30"}],
+                },
+                "bangladesh_domestic_eid_capital_outbound_one_way_2026": {
+                    "trip_type": "OW",
+                    "date_ranges": [{"start": "2026-03-11", "end": "2026-03-20"}],
+                },
+            }
+        }
+        temp_dir = Path("output/test_tmp")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        path = temp_dir / f"route_trip_windows_{uuid4().hex}.json"
+        try:
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with patch("core.trip_config.load_market_priors", return_value=priors):
+                overrides = load_route_trip_overrides(path, today=date(2026, 3, 10))
+        finally:
+            if path.exists():
+                path.unlink()
+
+        self.assertEqual(1, len(overrides))
+        self.assertEqual("RT", overrides[0]["trip_type"])
+        self.assertEqual([2], overrides[0]["return_offsets"])
+
+    def test_load_route_trip_overrides_training_mode_uses_full_candidate_profiles(self):
+        payload = {
+            "routes": [
+                {
+                    "airline": "BG",
+                    "route": "DAC-CXB",
+                    "market_trip_profiles": [
+                        "bangladesh_domestic_round_trip_short",
+                        "bangladesh_domestic_eid_capital_outbound_one_way_2026",
+                    ],
+                    "active_market_trip_profiles": [
+                        "bangladesh_domestic_round_trip_short",
+                    ],
+                }
+            ]
+        }
+        priors = {
+            "trip_date_profiles": {
+                "bangladesh_domestic_round_trip_short": {
+                    "trip_type": "RT",
+                    "return_date_offsets": [2],
+                },
+                "bangladesh_domestic_eid_capital_outbound_one_way_2026": {
+                    "trip_type": "OW",
+                    "date_ranges": [{"start": "2026-03-11", "end": "2026-03-20"}],
+                },
+            }
+        }
+        temp_dir = Path("output/test_tmp")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        path = temp_dir / f"route_trip_windows_{uuid4().hex}.json"
+        try:
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with patch("core.trip_config.load_market_priors", return_value=priors):
+                overrides = load_route_trip_overrides(path, today=date(2026, 3, 10), trip_plan_mode="training")
+        finally:
+            if path.exists():
+                path.unlink()
+
+        self.assertEqual(2, len(overrides))
+        self.assertEqual(["RT", "OW"], [item["trip_type"] for item in overrides])
+
+    def test_load_route_trip_overrides_training_mode_adds_training_only_profiles(self):
+        payload = {
+            "routes": [
+                {
+                    "airline": "BG",
+                    "route": "DAC-CXB",
+                    "market_trip_profiles": [
+                        "bangladesh_domestic_round_trip_short",
+                    ],
+                    "active_market_trip_profiles": [
+                        "bangladesh_domestic_round_trip_short",
+                    ],
+                    "training_market_trip_profiles": [
+                        "inventory_anchor_departure_tracking_default",
+                    ],
+                }
+            ]
+        }
+        priors = {
+            "trip_date_profiles": {
+                "bangladesh_domestic_round_trip_short": {
+                    "trip_type": "RT",
+                    "return_date_offsets": [2],
+                },
+                "inventory_anchor_departure_tracking_default": {
+                    "trip_type": "OW",
+                    "day_offsets": [7],
+                },
+            }
+        }
+        temp_dir = Path("output/test_tmp")
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        path = temp_dir / f"route_trip_windows_{uuid4().hex}.json"
+        try:
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with patch("core.trip_config.load_market_priors", return_value=priors):
+                overrides = load_route_trip_overrides(path, today=date(2026, 3, 10), trip_plan_mode="training")
+        finally:
+            if path.exists():
+                path.unlink()
+
+        self.assertEqual(2, len(overrides))
+        self.assertEqual(["RT", "OW"], [item["trip_type"] for item in overrides])
+        self.assertIn("2026-03-17", overrides[1]["outbound_dates"])
+
     def test_match_route_trip_override_prefers_airline_specific_rule(self):
         overrides = [
             {
@@ -160,10 +496,10 @@ class RouteTripConfigTests(unittest.TestCase):
         self.assertEqual(["2026-03-12", "2026-03-13"], plan["outbound_dates"])
         self.assertEqual(
             [
-                {"departure_date": "2026-03-12", "return_date": "2026-03-14"},
-                {"departure_date": "2026-03-12", "return_date": "2026-03-17"},
-                {"departure_date": "2026-03-13", "return_date": "2026-03-15"},
-                {"departure_date": "2026-03-13", "return_date": "2026-03-18"},
+                {"departure_date": "2026-03-12", "return_date": "2026-03-14", "trip_type": "RT"},
+                {"departure_date": "2026-03-12", "return_date": "2026-03-17", "trip_type": "RT"},
+                {"departure_date": "2026-03-13", "return_date": "2026-03-15", "trip_type": "RT"},
+                {"departure_date": "2026-03-13", "return_date": "2026-03-18", "trip_type": "RT"},
             ],
             plan["search_windows"],
         )
@@ -192,8 +528,8 @@ class RouteTripConfigTests(unittest.TestCase):
         self.assertEqual("OW", plan["trip_type"])
         self.assertEqual(
             [
-                {"departure_date": "2026-03-10", "return_date": None},
-                {"departure_date": "2026-03-12", "return_date": None},
+                {"departure_date": "2026-03-10", "return_date": None, "trip_type": "OW"},
+                {"departure_date": "2026-03-12", "return_date": None, "trip_type": "OW"},
             ],
             plan["search_windows"],
         )

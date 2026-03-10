@@ -23,8 +23,20 @@ This first architecture pass adds:
 The current reporting/UI pass adds:
 
 - route-monitor API exposure for trip metadata
-- route-page filters for `OW` / `RT` plus return date
+- route-page filters for `OW` / `RT`
+- one explicit `return_date`
+- return-date range filtering via `return_date_start` / `return_date_end`
 - grouped outbound/inbound route shells in the web monitor
+
+The current planning split adds:
+
+- `operational` mode:
+  - only active comparison-safe route profiles are used
+  - intended for core monitoring and cycle-to-cycle comparison
+- `training` mode:
+  - the fuller candidate market-trip profile set is used
+  - intended for forecasting/training enrichment, including holiday overlays
+  - may also add training-only inventory anchor profiles so the same departure horizon can be observed repeatedly over time
 
 ## Data Model
 
@@ -86,6 +98,9 @@ Outbound date selectors:
 - `--dates`
 - `--date-start` / `--date-end`
 - `--date-offsets`
+- `day_offset_start` / `day_offset_end`
+- `day_offset_range`
+- `day_offset_ranges`
 - `config/dates.json`
 
 Return-date selectors:
@@ -97,6 +112,12 @@ Return-date selectors:
 - `--return-date-offset-start` / `--return-date-offset-end`
 - `config/dates.json`
 - `config/route_trip_windows.json`
+
+Default outbound behavior:
+
+- if no explicit date arguments are passed, `run_all.py` now uses [`config/dates.json`](../config/dates.json)
+- the default repo seed is `day_offsets: [0, 3, 5, 7, 15]`
+- the old hardcoded `30` day fallback has been removed from the normal non-quick default
 
 Supported patterns:
 
@@ -159,6 +180,7 @@ Purpose:
 Preferred structure:
 
 - `profiles` for reusable trip policies
+- `market_trip_profile` when you want a route or airline block to inherit generic date logic from [`config/market_priors.json`](../config/market_priors.json)
 - `airlines` for grouped airline blocks
 - `default_profile` inside each airline block
 - `routes` map inside each airline block for route-specific overrides
@@ -174,8 +196,17 @@ Supported entry fields:
 - `origin` and `destination`
 - or `route` as `DAC-CXB`
 - `profile`
+- `market_trip_profile`
+- `market_trip_profiles`
+- `active_market_trip_profile`
+- `active_market_trip_profiles`
+- `training_market_trip_profile`
+- `training_market_trip_profiles`
 - `trip_type`
 - `dates`, `date_start` / `date_end`, `date_ranges`, `day_offsets`
+- `day_offset_start` / `day_offset_end`
+- `day_offset_range`
+- `day_offset_ranges`
 - `return_date`
 - `return_dates`
 - `return_date_start` / `return_date_end`
@@ -223,12 +254,50 @@ Example:
 Behavior:
 
 - airline `default_profile` applies to every route in that airline block unless the route overrides it
+- `market_trip_profile` lets you pull generic outbound / return-date ideas from [`config/market_priors.json`](../config/market_priors.json) and then override them locally
+- [`config/market_priors.json`](../config/market_priors.json) can now hold:
+  - reusable `trip_date_profiles`
+  - country-level `holiday_windows` with multiple date ranges
 - route-level config overrides the global trip mode for that route
 - named `profile` values let you reuse one rule set across many routes
 - route-level outbound dates override the global outbound dates for that route
 - route-level return selectors override the global return selectors for that route
 - if a route is forced to `OW`, return selectors are ignored for that route
 - if no route override matches, `run_all.py` uses the normal global CLI / `config/dates.json` settings
+
+Configuration precedence:
+
+1. explicit CLI date / trip arguments
+2. [`config/route_trip_windows.json`](../config/route_trip_windows.json) route-level fields
+3. `profile` from [`config/route_trip_windows.json`](../config/route_trip_windows.json)
+4. `market_trip_profile` from [`config/market_priors.json`](../config/market_priors.json)
+5. [`config/dates.json`](../config/dates.json) global outbound defaults
+
+Planning modes:
+
+- `operational`
+  - respects `active_market_trip_profiles` where defined
+  - keeps comparison cycles cleaner and runtime lower
+- `training`
+  - expands to the fuller candidate `market_trip_profiles`
+  - this is where holiday overlays, richer return windows, and inventory-anchor tracking belong
+
+Training-only inventory anchor tracking:
+
+- use `training_market_trip_profile` or `training_market_trip_profiles` in [`config/route_trip_windows.json`](../config/route_trip_windows.json)
+- these profiles are ignored in `operational` mode
+- they are appended only in `training` mode
+- intended use:
+  - fix a departure horizon like `+7 days`
+  - observe the same departure date repeatedly over time
+  - learn inventory fill / reopen speed and how fare moves alongside inventory
+
+Future-proof decision:
+
+- [`config/dates.json`](../config/dates.json) is the default date engine
+- [`config/market_priors.json`](../config/market_priors.json) is the reusable business-template and holiday layer
+- [`config/route_trip_windows.json`](../config/route_trip_windows.json) is the only explicit route activation layer
+- business templates do not auto-activate routes silently; routes are assigned intentionally in [`config/route_trip_windows.json`](../config/route_trip_windows.json)
 
 Matching rule:
 

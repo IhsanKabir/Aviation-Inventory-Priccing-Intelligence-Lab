@@ -31,8 +31,10 @@
    - `AirlineIntel_MaintenancePulse`
    - `AirlineIntel_Ingestion4H`
    - `AirlineIntel_IngestionOnLogon`
-  - Current default ingestion cadence is every 6 hours (`RepeatMinutes=360`).
-  - Ingestion launch policy is sequential: never start a new cycle while an active/fresh accumulation exists, and enforce a 30 minute buffer after the last completed accumulation.
+- Current default ingestion cadence is every 6 hours (`RepeatMinutes=360`).
+- Ingestion launch policy is sequential: never start a new cycle while an active/fresh accumulation exists, and enforce a configurable completion buffer after the last completed accumulation.
+- Current configured completion buffer is controlled by `ACCUMULATION_COMPLETION_BUFFER_MINUTES`.
+- Recommended home-laptop setting: `180` minutes.
 
 ## Exact Verification Commands
 
@@ -84,7 +86,7 @@ schtasks /Query /TN AirlineIntel_IngestionOnLogon /FO LIST /V | findstr /I /C:"S
 - Ingestion wrapper skips launches when:
   - a pipeline process is still active
   - heartbeat state is still `running` and fresh
-  - the last completed accumulation is less than 30 minutes old
+  - the last completed accumulation is less than the configured completion buffer old
 
 ## Current Runtime Baseline
 
@@ -108,6 +110,134 @@ Immediate runtime-reduction priorities:
 3. Use `tools/parallel_airline_runner.py` conservatively for safe airline-level parallelism.
 4. Keep prediction and sync enabled; they are not the primary runtime cost.
 5. Only expand round-trip coverage after one-way baseline runtime is under control.
+
+## Operational vs Training Cycles
+
+The collection stack now supports two trip-planning modes:
+
+- `operational`
+  - comparison-safe baseline for web freshness, health, and default cycle-to-cycle views
+  - uses only `active_market_trip_profiles` from [`config/route_trip_windows.json`](config/route_trip_windows.json)
+- `training`
+  - forecasting/model-enrichment pass
+  - expands to the fuller candidate `market_trip_profiles`, including holiday overlays and richer return windows
+  - may also include training-only inventory anchor profiles so repeated observations of the same departure horizon are collected for inventory movement modeling
+  - should own the richer forecasting refresh (`CatBoost + LightGBM + MLP`) and publish updated forecast outputs to BigQuery
+
+Current intent:
+
+- operational cycle = basic monitoring/comparison
+- training enrichment cycle = forecasting/training signal expansion
+- holiday overlays belong in training enrichment, not the default operational cycle
+- inventory-anchor tracking belongs in training enrichment, not the default operational cycle
+
+Current wrappers:
+
+- operational:
+  - [`scheduler/run_ingestion_4h_once.bat`](scheduler/run_ingestion_4h_once.bat)
+  - [`scheduler/run_ingestion_4h_once.sh`](scheduler/run_ingestion_4h_once.sh)
+- training enrichment:
+  - [`scheduler/run_training_enrichment_once.bat`](scheduler/run_training_enrichment_once.bat)
+  - [`scheduler/run_training_enrichment_once.sh`](scheduler/run_training_enrichment_once.sh)
+
+Notes:
+
+- the training wrapper sets `RUN_ALL_TRIP_PLAN_MODE=training`
+- `run_pipeline.py` now accepts `--trip-plan-mode operational|training`
+- the operational wrapper remains the default comparison-safe scheduler path
+
+## Home Laptop Scheduler
+
+Yes, the long-running training scheduler can be moved to another laptop.
+
+Recommended split:
+
+- primary machine:
+  - operational cycle only
+  - shorter, comparison-safe cadence
+- home / always-on laptop:
+  - training enrichment cycle
+  - long-running holiday/return-window expansion for forecasting
+  - if both operational and training are moved there, the machine becomes the single scheduler host
+
+Requirements for the home laptop:
+
+1. Clone the same repo revision.
+2. Create and populate `.venv`.
+3. Copy `.env` with:
+   - database connection
+   - `BIGQUERY_PROJECT_ID`
+   - `BIGQUERY_DATASET`
+   - `GOOGLE_APPLICATION_CREDENTIALS`
+4. Ensure network access to the same PostgreSQL instance.
+5. Ensure the machine does not sleep during the scheduled window.
+6. Register only the training scheduler there, not the operational 4-hour task.
+
+Recommended training launch command on Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scheduler\run_training_enrichment_once.bat
+```
+
+Default training model configuration:
+
+- `TRAINING_PREDICTION_ML_MODELS=catboost,lightgbm`
+- `TRAINING_PREDICTION_DL_MODELS=mlp`
+- `TRAINING_SKIP_BIGQUERY_SYNC=0`
+
+Meaning:
+
+- the home-laptop training scheduler is expected to refresh forecasting outputs
+- BigQuery forecast tables should be updated from that run
+- the hosted forecasting page should then read the refreshed outputs
+
+Recommended training schedule:
+
+- once daily, or
+- every 12-24 hours depending on runtime and model appetite
+
+Do not schedule training every 4 hours unless the runtime is proven safe on that second machine.
+
+## Recommended Home Laptop Setup
+
+Use a frequent lightweight launcher plus the preflight lock/buffer. That is more future-proof than trying to calculate exact next-start times manually.
+
+Suggested settings:
+
+- `.env`
+  - `ACCUMULATION_COMPLETION_BUFFER_MINUTES=180`
+  - `TRAINING_PREDICTION_ML_MODELS=catboost,lightgbm`
+  - `TRAINING_PREDICTION_DL_MODELS=mlp`
+  - `TRAINING_SKIP_BIGQUERY_SYNC=0`
+- operational launcher task
+  - check every `60` minutes
+  - preflight decides whether a real run may start
+- training enrichment task
+  - once daily or every `1440` minutes
+  - recommended start: `01:30` local time
+
+Why this is sensible:
+
+- the launcher itself is cheap
+- the preflight lock prevents overlap
+- the 3-hour completion buffer prevents immediate back-to-back restarts
+- hourly operational checks recover sooner after long runs than a rigid 6-hour trigger
+
+Important capacity note:
+
+- one laptop can host both schedulers
+- but with current estimated runtimes it is not realistic to expect many operational cycles plus a full training cycle every day from a single machine
+- realistic near-term expectation on one always-on laptop is:
+  - one comparison-safe operational run per day, and
+  - one training enrichment run per day
+- if you need more operational freshness than that, runtime must be reduced further or collection must be split across machines
+
+Windows install commands:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scheduler\install_ingestion_autorun.ps1 -RepeatMinutes 60
+powershell -ExecutionPolicy Bypass -File scheduler\install_training_enrichment_autorun.ps1 -StartTime 01:30 -RepeatMinutes 1440
+```
 
 ## If Daily Ops File Did Not Update
 

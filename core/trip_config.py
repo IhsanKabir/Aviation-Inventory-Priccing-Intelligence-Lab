@@ -15,6 +15,7 @@ from core.trip_context import (
     normalize_iso_date,
     normalize_trip_type,
 )
+from core.market_priors import load_market_priors
 
 
 def _parse_iso_date_list(values: list[Any]) -> list[str]:
@@ -121,6 +122,36 @@ def _extract_dates_from_obj(obj: Any, today: date) -> list[str]:
             values.append(offset)
         if values:
             return [(today + timedelta(days=offset)).isoformat() for offset in values]
+    elif isinstance(offsets, str):
+        values = _parse_offset_csv(offsets)
+        if values:
+            return [(today + timedelta(days=offset)).isoformat() for offset in values]
+
+    if obj.get("day_offset_start") is not None or obj.get("day_offset_end") is not None:
+        values = _expand_offset_range(obj.get("day_offset_start"), obj.get("day_offset_end"))
+        if values:
+            return [(today + timedelta(days=offset)).isoformat() for offset in values]
+
+    if isinstance(obj.get("day_offset_range"), dict):
+        values = _expand_offset_range(
+            obj["day_offset_range"].get("start"),
+            obj["day_offset_range"].get("end"),
+        )
+        if values:
+            return [(today + timedelta(days=offset)).isoformat() for offset in values]
+
+    if isinstance(obj.get("day_offset_ranges"), list):
+        merged: list[str] = []
+        for item in obj["day_offset_ranges"]:
+            if not isinstance(item, dict):
+                continue
+            values = _expand_offset_range(item.get("start"), item.get("end"))
+            for offset in values:
+                resolved = (today + timedelta(days=offset)).isoformat()
+                if resolved not in merged:
+                    merged.append(resolved)
+        if merged:
+            return merged
 
     return []
 
@@ -241,6 +272,74 @@ def _parse_route_endpoint_pair(item: dict[str, Any]) -> tuple[str | None, str | 
     return parts[0], parts[1]
 
 
+def _normalize_market_trip_profile_names(item: dict[str, Any]) -> list[str | None]:
+    raw_list = item.get("market_trip_profiles")
+    names: list[str | None] = []
+    if isinstance(raw_list, list):
+        for value in raw_list:
+            normalized = str(value or "").strip()
+            if normalized and normalized not in names:
+                names.append(normalized)
+    elif isinstance(raw_list, str):
+        for part in raw_list.split(","):
+            normalized = str(part or "").strip()
+            if normalized and normalized not in names:
+                names.append(normalized)
+
+    single = str(item.get("market_trip_profile") or "").strip()
+    if single and single not in names:
+        names.append(single)
+
+    return names or [None]
+
+
+def _normalize_active_market_trip_profile_names(item: dict[str, Any]) -> list[str] | None:
+    explicit = False
+    names: list[str] = []
+    raw_list = item.get("active_market_trip_profiles")
+    if isinstance(raw_list, list):
+        explicit = True
+        for value in raw_list:
+            normalized = str(value or "").strip()
+            if normalized and normalized not in names:
+                names.append(normalized)
+    elif isinstance(raw_list, str):
+        explicit = True
+        for part in raw_list.split(","):
+            normalized = str(part or "").strip()
+            if normalized and normalized not in names:
+                names.append(normalized)
+
+    single = str(item.get("active_market_trip_profile") or "").strip()
+    if single:
+        explicit = True
+        if single not in names:
+            names.append(single)
+
+    return names if explicit else None
+
+
+def _normalize_training_market_trip_profile_names(item: dict[str, Any]) -> list[str]:
+    names: list[str] = []
+    raw_list = item.get("training_market_trip_profiles")
+    if isinstance(raw_list, list):
+        for value in raw_list:
+            normalized = str(value or "").strip()
+            if normalized and normalized not in names:
+                names.append(normalized)
+    elif isinstance(raw_list, str):
+        for part in raw_list.split(","):
+            normalized = str(part or "").strip()
+            if normalized and normalized not in names:
+                names.append(normalized)
+
+    single = str(item.get("training_market_trip_profile") or "").strip()
+    if single and single not in names:
+        names.append(single)
+
+    return names
+
+
 def _flatten_grouped_airlines(
     payload: dict[str, Any],
     *,
@@ -261,6 +360,18 @@ def _flatten_grouped_airlines(
         airline_defaults: dict[str, Any] = {}
         if airline_block.get("default_profile"):
             airline_defaults["profile"] = airline_block.get("default_profile")
+        if airline_block.get("market_trip_profile"):
+            airline_defaults["market_trip_profile"] = airline_block.get("market_trip_profile")
+        if "market_trip_profiles" in airline_block:
+            airline_defaults["market_trip_profiles"] = airline_block.get("market_trip_profiles")
+        if "active_market_trip_profile" in airline_block:
+            airline_defaults["active_market_trip_profile"] = airline_block.get("active_market_trip_profile")
+        if "active_market_trip_profiles" in airline_block:
+            airline_defaults["active_market_trip_profiles"] = airline_block.get("active_market_trip_profiles")
+        if "training_market_trip_profile" in airline_block:
+            airline_defaults["training_market_trip_profile"] = airline_block.get("training_market_trip_profile")
+        if "training_market_trip_profiles" in airline_block:
+            airline_defaults["training_market_trip_profiles"] = airline_block.get("training_market_trip_profiles")
         if airline_block.get("trip_type") is not None:
             airline_defaults["trip_type"] = airline_block.get("trip_type")
         for key in (
@@ -270,6 +381,10 @@ def _flatten_grouped_airlines(
             "date_range",
             "date_ranges",
             "day_offsets",
+            "day_offset_start",
+            "day_offset_end",
+            "day_offset_range",
+            "day_offset_ranges",
             "return_date",
             "return_dates",
             "return_date_start",
@@ -321,6 +436,7 @@ def load_route_trip_overrides(
     path: Path,
     *,
     today: date,
+    trip_plan_mode: str = "operational",
     logger: logging.Logger | None = None,
 ) -> list[dict[str, Any]]:
     if not path.exists():
@@ -341,6 +457,38 @@ def load_route_trip_overrides(
             if not isinstance(profile, dict):
                 continue
             profiles[str(name)] = dict(profile)
+
+    market_trip_profiles: dict[str, dict[str, Any]] = {}
+    try:
+        priors = load_market_priors()
+        raw_market_profiles = priors.get("trip_date_profiles")
+        if isinstance(raw_market_profiles, dict):
+            for name, profile in raw_market_profiles.items():
+                if isinstance(profile, dict):
+                    market_trip_profiles[str(name)] = dict(profile)
+    except Exception:
+        market_trip_profiles = {}
+
+    def _apply_market_trip_profile(
+        item: dict[str, Any],
+        *,
+        market_profile_name: str | None,
+        source_label: str,
+    ) -> dict[str, Any] | None:
+        if not market_profile_name:
+            return dict(item)
+        market_profile = market_trip_profiles.get(market_profile_name)
+        if not market_profile:
+            if logger:
+                logger.warning(
+                    "Ignoring unknown market trip profile '%s' in %s",
+                    market_profile_name,
+                    source_label,
+                )
+            return None
+        merged = dict(market_profile)
+        merged.update(item)
+        return merged
 
     grouped_routes = []
     if isinstance(payload, dict):
@@ -364,8 +512,8 @@ def load_route_trip_overrides(
         if item.get("enabled") is False:
             continue
 
-        effective_item = dict(item)
         profile_name = str(item.get("profile") or "").strip()
+        base_item = dict(item)
         if profile_name:
             profile = profiles.get(profile_name)
             if not profile:
@@ -377,42 +525,116 @@ def load_route_trip_overrides(
                         index,
                     )
                 continue
-            effective_item = dict(profile)
-            effective_item.update(item)
+            base_item = dict(profile)
+            base_item.update(item)
 
-        origin, destination = _parse_route_endpoint_pair(effective_item)
-        if not origin or not destination:
+        market_profile_names = _normalize_market_trip_profile_names(base_item)
+        active_market_profile_names = _normalize_active_market_trip_profile_names(base_item)
+        training_market_profile_names = _normalize_training_market_trip_profile_names(base_item)
+        mode = str(trip_plan_mode or "operational").strip().lower()
+        if mode == "operational":
+            if active_market_profile_names is not None:
+                market_profile_names = [
+                    name for name in market_profile_names
+                    if name is None or name in active_market_profile_names
+                ]
+                if not market_profile_names and logger:
+                    logger.info(
+                        "Skipping route trip override %s[%d]: no active market trip profiles enabled",
+                        path,
+                        index,
+                    )
+                    continue
+        elif mode == "training":
+            # Training mode intentionally uses the broader candidate profile set.
+            for name in training_market_profile_names:
+                if name not in market_profile_names:
+                    market_profile_names.append(name)
+        else:
             if logger:
                 logger.warning(
-                    "Ignoring route trip override %s[%d]: missing origin/destination or route",
-                    path,
-                    index,
+                    "Unknown trip_plan_mode '%s'; falling back to operational activation behavior",
+                    trip_plan_mode,
                 )
-            continue
+            if active_market_profile_names is not None:
+                market_profile_names = [
+                    name for name in market_profile_names
+                    if name is None or name in active_market_profile_names
+                ]
+                if not market_profile_names and logger:
+                    logger.info(
+                        "Skipping route trip override %s[%d]: no active market trip profiles enabled",
+                        path,
+                        index,
+                    )
+                    continue
+        for market_profile_name in market_profile_names:
+            effective_item = _apply_market_trip_profile(
+                dict(base_item),
+                market_profile_name=market_profile_name,
+                source_label=f"{path}[{index}]",
+            )
+            if effective_item is None:
+                continue
 
-        airline = str(effective_item.get("airline") or "").strip().upper() or None
-        trip_type_raw = effective_item.get("trip_type")
-        trip_type = normalize_trip_type(trip_type_raw) if trip_type_raw else None
-        outbound_dates = _extract_dates_from_obj(effective_item, today=today)
-        return_dates, return_offsets = _extract_return_selectors_from_obj(
-            effective_item,
-            source_label=f"{path}[{index}]",
-            logger=logger,
-        )
+            origin, destination = _parse_route_endpoint_pair(effective_item)
+            if not origin or not destination:
+                if logger:
+                    logger.warning(
+                        "Ignoring route trip override %s[%d]: missing origin/destination or route",
+                        path,
+                        index,
+                    )
+                continue
 
-        overrides.append(
-            {
-                "airline": airline,
-                "origin": origin,
-                "destination": destination,
-                "trip_type": trip_type,
-                "outbound_dates": outbound_dates,
-                "return_dates": return_dates,
-                "return_offsets": return_offsets,
-                "source": f"{path}[{index}]",
-            }
-        )
+            airline = str(effective_item.get("airline") or "").strip().upper() or None
+            trip_type_raw = effective_item.get("trip_type")
+            trip_type = normalize_trip_type(trip_type_raw) if trip_type_raw else None
+            outbound_dates = _extract_dates_from_obj(effective_item, today=today)
+            return_dates, return_offsets = _extract_return_selectors_from_obj(
+                effective_item,
+                source_label=f"{path}[{index}]",
+                logger=logger,
+            )
+
+            source_suffix = f"#{market_profile_name}" if market_profile_name else ""
+            overrides.append(
+                {
+                    "airline": airline,
+                    "origin": origin,
+                    "destination": destination,
+                    "trip_type": trip_type,
+                    "outbound_dates": outbound_dates,
+                    "return_dates": return_dates,
+                    "return_offsets": return_offsets,
+                    "source": f"{path}[{index}]{source_suffix}",
+                }
+            )
     return overrides
+
+
+def match_route_trip_overrides(
+    overrides: list[dict[str, Any]],
+    *,
+    airline: str,
+    origin: str,
+    destination: str,
+) -> list[dict[str, Any]]:
+    airline_code = str(airline or "").strip().upper()
+    origin_code = str(origin or "").strip().upper()
+    destination_code = str(destination or "").strip().upper()
+
+    specific_matches: list[dict[str, Any]] = []
+    wildcard_matches: list[dict[str, Any]] = []
+    for item in overrides:
+        if item.get("origin") != origin_code or item.get("destination") != destination_code:
+            continue
+        item_airline = item.get("airline")
+        if item_airline == airline_code:
+            specific_matches.append(item)
+        elif not item_airline:
+            wildcard_matches.append(item)
+    return specific_matches or wildcard_matches
 
 
 def match_route_trip_override(
@@ -422,20 +644,13 @@ def match_route_trip_override(
     origin: str,
     destination: str,
 ) -> dict[str, Any] | None:
-    airline_code = str(airline or "").strip().upper()
-    origin_code = str(origin or "").strip().upper()
-    destination_code = str(destination or "").strip().upper()
-
-    wildcard_match: dict[str, Any] | None = None
-    for item in overrides:
-        if item.get("origin") != origin_code or item.get("destination") != destination_code:
-            continue
-        item_airline = item.get("airline")
-        if item_airline == airline_code:
-            return item
-        if not item_airline and wildcard_match is None:
-            wildcard_match = item
-    return wildcard_match
+    matches = match_route_trip_overrides(
+        overrides,
+        airline=airline,
+        origin=origin,
+        destination=destination,
+    )
+    return matches[0] if matches else None
 
 
 def resolve_route_trip_plan(
@@ -478,6 +693,14 @@ def resolve_route_trip_plan(
         return_dates=return_dates,
         return_offsets=return_offsets,
     )
+    search_windows = [
+        {
+            "departure_date": window["departure_date"],
+            "return_date": window["return_date"],
+            "trip_type": trip_type,
+        }
+        for window in search_windows
+    ]
 
     return {
         "trip_type": trip_type,

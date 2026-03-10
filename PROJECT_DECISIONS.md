@@ -51,7 +51,13 @@ Target: implement as much as possible in parallel, but execute in phases when ne
 - Target every 3-4 hours (adaptive by actual runtime/load)
 - Scheduler launch policy is sequential, not overlapping:
   - do not start a new ingestion cycle while an active/fresh accumulation exists
-  - enforce a 30 minute buffer after a completed accumulation before the next launch
+  - enforce a configurable completion buffer after a completed accumulation before the next launch
+  - current recommended default: `180` minutes on the always-on scheduler host
+- Collection is now split into two planning modes:
+  - `operational`: comparison-safe baseline for web freshness and cycle-to-cycle monitoring
+  - `training`: fuller candidate profile set for forecasting/model enrichment, including holiday overlays where configured
+  - training mode may also include inventory-anchor departure tracking so the same future departure horizon is observed repeatedly for inventory movement learning
+  - training mode is the preferred place to run richer forecasting refreshes (`CatBoost`, `LightGBM`, `MLP`) and publish those outputs to BigQuery for the hosted forecasting surfaces
 
 ### Required Data Fields
 

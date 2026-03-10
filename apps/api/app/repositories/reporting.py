@@ -1479,6 +1479,8 @@ def _get_route_monitor_matrix_from_bigquery(
     cabins: Sequence[str] | None = None,
     trip_types: Sequence[str] | None = None,
     return_date: date | None = None,
+    return_date_start: date | None = None,
+    return_date_end: date | None = None,
     route_limit: int = 8,
     history_limit: int = 12,
 ) -> dict[str, Any]:
@@ -1510,6 +1512,13 @@ def _get_route_monitor_matrix_from_bigquery(
     if return_date:
         route_filters.append("requested_return_date = @return_date")
         route_params.append(bigquery.ScalarQueryParameter("return_date", "DATE", return_date))
+    else:
+        if return_date_start:
+            route_filters.append("requested_return_date >= @return_date_start")
+            route_params.append(bigquery.ScalarQueryParameter("return_date_start", "DATE", return_date_start))
+        if return_date_end:
+            route_filters.append("requested_return_date <= @return_date_end")
+            route_params.append(bigquery.ScalarQueryParameter("return_date_end", "DATE", return_date_end))
     if normalized_trip_types:
         if origins:
             route_filters.append("trip_origin IN UNNEST(@trip_origins)")
@@ -1556,6 +1565,13 @@ def _get_route_monitor_matrix_from_bigquery(
     if return_date:
         current_filters.append("requested_return_date = @return_date")
         current_params.append(bigquery.ScalarQueryParameter("return_date", "DATE", return_date))
+    else:
+        if return_date_start:
+            current_filters.append("requested_return_date >= @return_date_start")
+            current_params.append(bigquery.ScalarQueryParameter("return_date_start", "DATE", return_date_start))
+        if return_date_end:
+            current_filters.append("requested_return_date <= @return_date_end")
+            current_params.append(bigquery.ScalarQueryParameter("return_date_end", "DATE", return_date_end))
 
     current_rows = _serialize_warehouse_rows(
         _run_bigquery_query(
@@ -1689,6 +1705,13 @@ def _get_route_monitor_matrix_from_bigquery(
     if return_date:
         history_filters.append("requested_return_date = @return_date")
         history_params.append(bigquery.ScalarQueryParameter("return_date", "DATE", return_date))
+    else:
+        if return_date_start:
+            history_filters.append("requested_return_date >= @return_date_start")
+            history_params.append(bigquery.ScalarQueryParameter("return_date_start", "DATE", return_date_start))
+        if return_date_end:
+            history_filters.append("requested_return_date <= @return_date_end")
+            history_params.append(bigquery.ScalarQueryParameter("return_date_end", "DATE", return_date_end))
 
     history_rows = _serialize_warehouse_rows(
         _run_bigquery_query(
@@ -1867,6 +1890,8 @@ def get_route_monitor_matrix(
     cabins: Sequence[str] | None = None,
     trip_types: Sequence[str] | None = None,
     return_date: date | None = None,
+    return_date_start: date | None = None,
+    return_date_end: date | None = None,
     route_limit: int = 8,
     history_limit: int = 12,
 ) -> dict[str, Any]:
@@ -1881,6 +1906,8 @@ def get_route_monitor_matrix(
                 cabins=cabins,
                 trip_types=normalized_trip_types,
                 return_date=return_date,
+                return_date_start=return_date_start,
+                return_date_end=return_date_end,
                 route_limit=route_limit,
                 history_limit=history_limit,
             )
@@ -1902,6 +1929,13 @@ def get_route_monitor_matrix(
     if return_date:
         route_clauses.append("frm.requested_return_date = :route_return_date")
         route_params["route_return_date"] = return_date.isoformat()
+    else:
+        if return_date_start:
+            route_clauses.append("frm.requested_return_date >= :route_return_date_start")
+            route_params["route_return_date_start"] = return_date_start.isoformat()
+        if return_date_end:
+            route_clauses.append("frm.requested_return_date <= :route_return_date_end")
+            route_params["route_return_date_end"] = return_date_end.isoformat()
     if normalized_trip_types:
         _apply_in_filter(route_clauses, route_params, "COALESCE(frm.trip_origin, fo.origin)", origins, "route_trip_origin")
         _apply_in_filter(route_clauses, route_params, "COALESCE(frm.trip_destination, fo.destination)", destinations, "route_trip_destination")
@@ -1946,6 +1980,13 @@ def get_route_monitor_matrix(
     if return_date:
         current_clauses.append("frm.requested_return_date = :matrix_return_date")
         current_params["matrix_return_date"] = return_date.isoformat()
+    else:
+        if return_date_start:
+            current_clauses.append("frm.requested_return_date >= :matrix_return_date_start")
+            current_params["matrix_return_date_start"] = return_date_start.isoformat()
+        if return_date_end:
+            current_clauses.append("frm.requested_return_date <= :matrix_return_date_end")
+            current_params["matrix_return_date_end"] = return_date_end.isoformat()
 
     current_rows = session.execute(
         text(
@@ -2047,6 +2088,13 @@ def get_route_monitor_matrix(
     if return_date:
         history_clauses.append("frm.requested_return_date = :history_return_date")
         history_params["history_return_date"] = return_date.isoformat()
+    else:
+        if return_date_start:
+            history_clauses.append("frm.requested_return_date >= :history_return_date_start")
+            history_params["history_return_date_start"] = return_date_start.isoformat()
+        if return_date_end:
+            history_clauses.append("frm.requested_return_date <= :history_return_date_end")
+            history_params["history_return_date_end"] = return_date_end.isoformat()
 
     history_rows = session.execute(
         text(

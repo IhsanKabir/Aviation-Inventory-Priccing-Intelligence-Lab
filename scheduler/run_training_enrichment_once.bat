@@ -5,9 +5,10 @@ if not exist "%ROOT%\logs" mkdir "%ROOT%\logs"
 if not exist "%ROOT%\output\reports" mkdir "%ROOT%\output\reports"
 
 set "PYEXE=%ROOT%\.venv\Scripts\python.exe"
-set "LOGFILE=%ROOT%\logs\ingestion_4h.log"
+set "LOGFILE=%ROOT%\logs\training_enrichment.log"
 set "RECOVERY_HELPER=%ROOT%\tools\recover_interrupted_accumulation.py"
 set "ENVFILE=%ROOT%\.env"
+set "RUN_ALL_TRIP_PLAN_MODE=training"
 
 if not exist "%PYEXE%" (
   echo [%date% %time%] python exe not found: %PYEXE%>> "%LOGFILE%"
@@ -20,10 +21,16 @@ if exist "%ENVFILE%" (
     if /I "%%~A"=="BIGQUERY_DATASET" set "BIGQUERY_DATASET=%%~B"
     if /I "%%~A"=="GOOGLE_APPLICATION_CREDENTIALS" set "GOOGLE_APPLICATION_CREDENTIALS=%%~B"
     if /I "%%~A"=="ACCUMULATION_COMPLETION_BUFFER_MINUTES" set "ACCUMULATION_COMPLETION_BUFFER_MINUTES=%%~B"
+    if /I "%%~A"=="TRAINING_PREDICTION_ML_MODELS" set "TRAINING_PREDICTION_ML_MODELS=%%~B"
+    if /I "%%~A"=="TRAINING_PREDICTION_DL_MODELS" set "TRAINING_PREDICTION_DL_MODELS=%%~B"
+    if /I "%%~A"=="TRAINING_SKIP_BIGQUERY_SYNC" set "TRAINING_SKIP_BIGQUERY_SYNC=%%~B"
   )
 )
 
 if not defined ACCUMULATION_COMPLETION_BUFFER_MINUTES set "ACCUMULATION_COMPLETION_BUFFER_MINUTES=180"
+if not defined TRAINING_PREDICTION_ML_MODELS set "TRAINING_PREDICTION_ML_MODELS=catboost,lightgbm"
+if not defined TRAINING_PREDICTION_DL_MODELS set "TRAINING_PREDICTION_DL_MODELS=mlp"
+if not defined TRAINING_SKIP_BIGQUERY_SYNC set "TRAINING_SKIP_BIGQUERY_SYNC=0"
 
 if not defined BIGQUERY_PROJECT_ID (
   echo [%date% %time%] warning: BIGQUERY_PROJECT_ID not set; automatic BigQuery sync will be skipped>> "%LOGFILE%"
@@ -39,20 +46,24 @@ if exist "%RECOVERY_HELPER%" (
   "%PYEXE%" "%RECOVERY_HELPER%" --mode preflight --python-exe "%PYEXE%" --root "%ROOT%" --reports-dir "%ROOT%\output\reports" --min-completed-gap-minutes "%ACCUMULATION_COMPLETION_BUFFER_MINUTES%" >> "%LOGFILE%" 2>&1
   set "PRE_RC=%ERRORLEVEL%"
   if "!PRE_RC!"=="10" (
-    echo [%date% %time%] ingestion cycle skipped: active or fresh accumulation already present>> "%LOGFILE%"
+    echo [%date% %time%] training enrichment skipped: active or fresh accumulation already present>> "%LOGFILE%"
     exit /b 0
   )
   if "!PRE_RC!"=="11" (
-    echo [%date% %time%] ingestion cycle skipped: %ACCUMULATION_COMPLETION_BUFFER_MINUTES% minute post-completion buffer is active>> "%LOGFILE%"
+    echo [%date% %time%] training enrichment skipped: %ACCUMULATION_COMPLETION_BUFFER_MINUTES% minute post-completion buffer is active>> "%LOGFILE%"
     exit /b 0
   )
   if not "!PRE_RC!"=="0" (
-    echo [%date% %time%] ingestion preflight warning rc=!PRE_RC! (continuing)>> "%LOGFILE%"
+    echo [%date% %time%] training preflight warning rc=!PRE_RC! (continuing)>> "%LOGFILE%"
   )
 )
 
-echo [%date% %time%] starting ingestion cycle>> "%LOGFILE%"
-"%PYEXE%" "%ROOT%\run_pipeline.py" --python-exe "%PYEXE%" --skip-reports --report-output-dir "%ROOT%\output\reports" --report-timestamp-tz local >> "%LOGFILE%" 2>&1
+echo [%date% %time%] starting training enrichment cycle>> "%LOGFILE%"
+if /I "%TRAINING_SKIP_BIGQUERY_SYNC%"=="1" (
+  "%PYEXE%" "%ROOT%\run_pipeline.py" --python-exe "%PYEXE%" --trip-plan-mode training --skip-reports --report-output-dir "%ROOT%\output\reports" --report-timestamp-tz local --prediction-ml-models "%TRAINING_PREDICTION_ML_MODELS%" --prediction-dl-models "%TRAINING_PREDICTION_DL_MODELS%" --skip-bigquery-sync >> "%LOGFILE%" 2>&1
+) else (
+  "%PYEXE%" "%ROOT%\run_pipeline.py" --python-exe "%PYEXE%" --trip-plan-mode training --skip-reports --report-output-dir "%ROOT%\output\reports" --report-timestamp-tz local --prediction-ml-models "%TRAINING_PREDICTION_ML_MODELS%" --prediction-dl-models "%TRAINING_PREDICTION_DL_MODELS%" >> "%LOGFILE%" 2>&1
+)
 set "RC=%ERRORLEVEL%"
-echo [%date% %time%] ingestion cycle finished rc=!RC!>> "%LOGFILE%"
+echo [%date% %time%] training enrichment cycle finished rc=!RC!>> "%LOGFILE%"
 exit /b !RC!

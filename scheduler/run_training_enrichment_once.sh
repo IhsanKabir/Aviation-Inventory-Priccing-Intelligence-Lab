@@ -5,9 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 mkdir -p "$ROOT/logs" "$ROOT/output/reports"
 
 PYEXE="$ROOT/.venv/bin/python"
-LOGFILE="$ROOT/logs/ingestion_4h.log"
+LOGFILE="$ROOT/logs/training_enrichment.log"
 RECOVERY_HELPER="$ROOT/tools/recover_interrupted_accumulation.py"
 ENVFILE="$ROOT/.env"
+export RUN_ALL_TRIP_PLAN_MODE=training
 
 timestamp() {
   date "+%Y-%m-%d %H:%M:%S"
@@ -23,7 +24,7 @@ if [[ -f "$ENVFILE" ]]; then
     [[ -z "${key// }" ]] && continue
     [[ "$key" =~ ^[[:space:]]*# ]] && continue
     case "$key" in
-      BIGQUERY_PROJECT_ID|BIGQUERY_DATASET|GOOGLE_APPLICATION_CREDENTIALS|ACCUMULATION_COMPLETION_BUFFER_MINUTES)
+      BIGQUERY_PROJECT_ID|BIGQUERY_DATASET|GOOGLE_APPLICATION_CREDENTIALS|ACCUMULATION_COMPLETION_BUFFER_MINUTES|TRAINING_PREDICTION_ML_MODELS|TRAINING_PREDICTION_DL_MODELS|TRAINING_SKIP_BIGQUERY_SYNC)
         export "$key"="${value:-}"
         ;;
     esac
@@ -31,6 +32,9 @@ if [[ -f "$ENVFILE" ]]; then
 fi
 
 export ACCUMULATION_COMPLETION_BUFFER_MINUTES="${ACCUMULATION_COMPLETION_BUFFER_MINUTES:-180}"
+export TRAINING_PREDICTION_ML_MODELS="${TRAINING_PREDICTION_ML_MODELS:-catboost,lightgbm}"
+export TRAINING_PREDICTION_DL_MODELS="${TRAINING_PREDICTION_DL_MODELS:-mlp}"
+export TRAINING_SKIP_BIGQUERY_SYNC="${TRAINING_SKIP_BIGQUERY_SYNC:-0}"
 
 if [[ -z "${BIGQUERY_PROJECT_ID:-}" ]]; then
   echo "[$(timestamp)] warning: BIGQUERY_PROJECT_ID not set; automatic BigQuery sync will be skipped" >> "$LOGFILE"
@@ -54,26 +58,35 @@ if [[ -f "$RECOVERY_HELPER" ]]; then
   set -e
 
   if [[ "$PRE_RC" -eq 10 ]]; then
-    echo "[$(timestamp)] ingestion cycle skipped: active or fresh accumulation already present" >> "$LOGFILE"
+    echo "[$(timestamp)] training enrichment skipped: active or fresh accumulation already present" >> "$LOGFILE"
     exit 0
   fi
   if [[ "$PRE_RC" -eq 11 ]]; then
-    echo "[$(timestamp)] ingestion cycle skipped: ${ACCUMULATION_COMPLETION_BUFFER_MINUTES} minute post-completion buffer is active" >> "$LOGFILE"
+    echo "[$(timestamp)] training enrichment skipped: ${ACCUMULATION_COMPLETION_BUFFER_MINUTES} minute post-completion buffer is active" >> "$LOGFILE"
     exit 0
   fi
   if [[ "$PRE_RC" -ne 0 ]]; then
-    echo "[$(timestamp)] ingestion preflight warning rc=$PRE_RC (continuing)" >> "$LOGFILE"
+    echo "[$(timestamp)] training preflight warning rc=$PRE_RC (continuing)" >> "$LOGFILE"
   fi
 fi
 
-echo "[$(timestamp)] starting ingestion cycle" >> "$LOGFILE"
+echo "[$(timestamp)] starting training enrichment cycle" >> "$LOGFILE"
 set +e
-"$PYEXE" "$ROOT/run_pipeline.py" \
-  --python-exe "$PYEXE" \
-  --skip-reports \
-  --report-output-dir "$ROOT/output/reports" \
-  --report-timestamp-tz local >> "$LOGFILE" 2>&1
+cmd=(
+  "$PYEXE" "$ROOT/run_pipeline.py"
+  --python-exe "$PYEXE"
+  --trip-plan-mode training
+  --skip-reports
+  --report-output-dir "$ROOT/output/reports"
+  --report-timestamp-tz local
+  --prediction-ml-models "$TRAINING_PREDICTION_ML_MODELS"
+  --prediction-dl-models "$TRAINING_PREDICTION_DL_MODELS"
+)
+if [[ "$TRAINING_SKIP_BIGQUERY_SYNC" == "1" ]]; then
+  cmd+=(--skip-bigquery-sync)
+fi
+"${cmd[@]}" >> "$LOGFILE" 2>&1
 RC=$?
 set -e
-echo "[$(timestamp)] ingestion cycle finished rc=$RC" >> "$LOGFILE"
+echo "[$(timestamp)] training enrichment cycle finished rc=$RC" >> "$LOGFILE"
 exit "$RC"

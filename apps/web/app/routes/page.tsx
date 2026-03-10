@@ -157,6 +157,25 @@ function buildRoutePriorityBoard(routes: RouteMonitorMatrixRoute[]) {
     .slice(0, 8);
 }
 
+function buildTripScopeLabel(
+  tripType: string,
+  returnScope: string,
+  returnDate?: string,
+  returnDateStart?: string,
+  returnDateEnd?: string
+) {
+  if (tripType !== "RT") {
+    return "One-way observations";
+  }
+  if (returnScope === "exact" && returnDate) {
+    return `Round-trip · return ${returnDate}`;
+  }
+  if (returnScope === "range" && (returnDateStart || returnDateEnd)) {
+    return `Round-trip · return window ${returnDateStart ?? "any"} to ${returnDateEnd ?? "any"}`;
+  }
+  return "Round-trip · any collected return date";
+}
+
 export default async function RoutesPage({ searchParams }: PageProps) {
   const params = (await searchParams) ?? {};
   const selectedAirlines = manyParams(params, "airline");
@@ -165,9 +184,26 @@ export default async function RoutesPage({ searchParams }: PageProps) {
   const cabin = firstParam(params, "cabin");
   const tripType = firstParam(params, "trip_type") ?? "OW";
   const returnDate = firstParam(params, "return_date");
+  const returnDateStart = firstParam(params, "return_date_start");
+  const returnDateEnd = firstParam(params, "return_date_end");
+  const returnScope =
+    firstParam(params, "return_scope") ??
+    (returnDateStart || returnDateEnd ? "range" : returnDate ? "exact" : "any");
   const cycleId = firstParam(params, "cycle_id") ?? undefined;
   const routeLimit = parseLimit(firstParam(params, "route_limit"), 5);
   const historyLimit = parseLimit(firstParam(params, "history_limit"), 6);
+  const effectiveReturnDate = tripType === "RT" && returnScope === "exact" ? returnDate ?? undefined : undefined;
+  const effectiveReturnDateStart =
+    tripType === "RT" && returnScope === "range" ? returnDateStart ?? undefined : undefined;
+  const effectiveReturnDateEnd =
+    tripType === "RT" && returnScope === "range" ? returnDateEnd ?? undefined : undefined;
+  const tripScopeLabel = buildTripScopeLabel(
+    tripType,
+    returnScope,
+    effectiveReturnDate,
+    effectiveReturnDateStart,
+    effectiveReturnDateEnd
+  );
 
   const [routes, recentCycles, matrix] = await Promise.all([
     getRoutes(),
@@ -178,7 +214,9 @@ export default async function RoutesPage({ searchParams }: PageProps) {
       destinations: destination ? [destination] : undefined,
       cabins: cabin ? [cabin] : undefined,
       tripTypes: tripType ? [tripType] : undefined,
-      returnDate: returnDate ?? undefined,
+      returnDate: effectiveReturnDate,
+      returnDateStart: effectiveReturnDateStart,
+      returnDateEnd: effectiveReturnDateEnd,
       routeLimit,
       historyLimit
     })
@@ -273,8 +311,24 @@ export default async function RoutesPage({ searchParams }: PageProps) {
                 </select>
               </label>
               <label className="field">
+                <span>Return scope</span>
+                <select defaultValue={returnScope} name="return_scope">
+                  <option value="any">Any collected return</option>
+                  <option value="exact">Single return date</option>
+                  <option value="range">Return date range</option>
+                </select>
+              </label>
+              <label className="field">
                 <span>Return date</span>
                 <input defaultValue={returnDate ?? ""} name="return_date" type="date" />
+              </label>
+              <label className="field">
+                <span>Return start</span>
+                <input defaultValue={returnDateStart ?? ""} name="return_date_start" type="date" />
+              </label>
+              <label className="field">
+                <span>Return end</span>
+                <input defaultValue={returnDateEnd ?? ""} name="return_date_end" type="date" />
               </label>
               <label className="field">
                 <span>Route blocks</span>
@@ -296,12 +350,54 @@ export default async function RoutesPage({ searchParams }: PageProps) {
                 Reset scope
               </a>
             </div>
+            <p className="page-copy" style={{ marginTop: "0.25rem" }}>
+              Trip scope: {tripScopeLabel}
+            </p>
             {routeOptions.length ? (
               <div className="route-hint-row">
                 {routeOptions.map((item) => (
                   <a
                     className="route-hint-chip"
-                    href={`/routes?origin=${encodeURIComponent(item.origin)}&destination=${encodeURIComponent(item.destination)}&route_limit=${routeLimit}&history_limit=${historyLimit}${cabin ? `&cabin=${encodeURIComponent(cabin)}` : ""}${tripType ? `&trip_type=${encodeURIComponent(tripType)}` : ""}${returnDate ? `&return_date=${encodeURIComponent(returnDate)}` : ""}${cycleId ? `&cycle_id=${encodeURIComponent(cycleId)}` : ""}`}
+                    href={buildHref(
+                      setParam(
+                        setParam(
+                          setParam(
+                            setParam(
+                              setParam(
+                                setParam(
+                                  setParam(
+                                    setParam(
+                                      {
+                                        origin: item.origin,
+                                        destination: item.destination,
+                                        route_limit: String(routeLimit),
+                                        history_limit: String(historyLimit)
+                                      },
+                                      "cabin",
+                                      cabin ?? undefined
+                                    ),
+                                    "trip_type",
+                                    tripType
+                                  ),
+                                  "return_scope",
+                                  tripType === "RT" ? returnScope : undefined
+                                ),
+                                "return_date",
+                                effectiveReturnDate
+                              ),
+                              "return_date_start",
+                              effectiveReturnDateStart
+                            ),
+                            "return_date_end",
+                            effectiveReturnDateEnd
+                          ),
+                          "cycle_id",
+                          cycleId
+                        ),
+                        "airline",
+                        undefined
+                      )
+                    )}
                     key={item.routeKey}
                   >
                     {item.routeKey}

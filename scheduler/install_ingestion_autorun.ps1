@@ -69,6 +69,11 @@ function Register-IngestionTask {
         $anchor = $anchor.AddDays(1)
     }
 
+    if ($WhatIf) {
+        Write-Host "[WhatIf] Register-ScheduledTask -TaskName $Name (every $EveryMinutes minutes, anchor $($anchor.ToString('yyyy-MM-dd HH:mm')))"
+        return
+    }
+
     $arg = "/c `"$TargetBatch`""
     $action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument $arg
     $trigger = New-ScheduledTaskTrigger `
@@ -83,11 +88,6 @@ function Register-IngestionTask {
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit (New-TimeSpan -Hours 8)
-
-    if ($WhatIf) {
-        Write-Host "[WhatIf] Register-ScheduledTask -TaskName $Name (every $EveryMinutes minutes, anchor $($anchor.ToString('yyyy-MM-dd HH:mm')))"
-        return
-    }
 
     $task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings
     Register-ScheduledTask -TaskName $Name -InputObject $task -Force | Out-Null

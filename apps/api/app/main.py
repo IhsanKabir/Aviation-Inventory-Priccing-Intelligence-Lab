@@ -122,6 +122,8 @@ def route_monitor_matrix(
     cabin: list[str] | None = Query(default=None),
     trip_type: list[str] | None = Query(default=None),
     return_date: date | None = None,
+    return_date_start: date | None = None,
+    return_date_end: date | None = None,
     route_limit: int = Query(default=8, ge=1, le=24),
     history_limit: int = Query(default=12, ge=1, le=48),
     db: Session | None = Depends(get_optional_db),
@@ -135,6 +137,8 @@ def route_monitor_matrix(
         cabins=cabin,
         trip_types=trip_type,
         return_date=return_date,
+        return_date_start=return_date_start,
+        return_date_end=return_date_end,
         route_limit=route_limit,
         history_limit=history_limit,
     )

@@ -21,6 +21,11 @@ def parse_args():
     p.add_argument("--python-exe", default=sys.executable)
     p.add_argument("--airlines-config", default="config/airlines.json")
     p.add_argument("--max-workers", type=int, default=2)
+    p.add_argument(
+        "--trip-plan-mode",
+        choices=["operational", "training"],
+        default="operational",
+    )
     p.add_argument("--cycle-id", help="Optional shared cycle UUID for all airline worker processes")
     p.add_argument("--origin")
     p.add_argument("--destination")
@@ -62,6 +67,7 @@ def _build_cmd(args, airline: str, cycle_id: str):
     if args.quick:
         cmd.append("--quick")
     for flag, value in [
+        ("--trip-plan-mode", args.trip_plan_mode),
         ("--origin", args.origin),
         ("--destination", args.destination),
         ("--date", args.date),

@@ -48,7 +48,7 @@ from core.trip_context import (
 )
 from core.trip_config import (
     load_route_trip_overrides,
-    match_route_trip_override,
+    match_route_trip_overrides,
     resolve_route_trip_plan,
 )
 from modules.penalties import apply_penalty_inference
@@ -128,6 +128,12 @@ def parse_args():
         "--route-trip-config",
         default=str(ROUTE_TRIP_CONFIG_FILE),
         help="Optional JSON file with route-wise OW/RT and return-date overrides.",
+    )
+    parser.add_argument(
+        "--trip-plan-mode",
+        choices=["operational", "training"],
+        default=os.getenv("RUN_ALL_TRIP_PLAN_MODE", "operational"),
+        help="Route trip activation mode: 'operational' uses active subsets, 'training' uses the fuller candidate profile set.",
     )
     parser.add_argument("--cabin", help="Filter to a single cabin name (e.g., Economy)")
     parser.add_argument("--adt", type=int, default=1, help="Adult passenger count for search requests (default: 1)")
@@ -276,6 +282,7 @@ def _load_dates_from_file(path: Path, today: datetime.date) -> list[str]:
     # 1) ["2026-03-01", "2026-03-07"]
     # 2) {"dates": [...]} or {"day_offsets": [0,3,7,30]}
     # 3) {"date_ranges": [{"start":"2026-03-10","end":"2026-03-20"}, ...]}
+    # 4) {"day_offset_range":{"start":7,"end":10}} or {"day_offset_ranges":[...]}
     # Return-date selectors are handled separately by _load_return_selectors_from_file.
     if isinstance(obj, list):
         return _parse_iso_date_list(obj)
@@ -323,6 +330,32 @@ def _load_dates_from_file(path: Path, today: datetime.date) -> list[str]:
                     continue
             offs = list(dict.fromkeys(offs))
             return [(today + datetime.timedelta(days=o)).isoformat() for o in offs]
+        if isinstance(obj.get("day_offsets"), str):
+            offs = _parse_offsets(obj.get("day_offsets"))
+            return [(today + datetime.timedelta(days=o)).isoformat() for o in offs]
+        if obj.get("day_offset_start") is not None or obj.get("day_offset_end") is not None:
+            offs = _expand_offset_range(obj.get("day_offset_start"), obj.get("day_offset_end"))
+            if offs:
+                return [(today + datetime.timedelta(days=o)).isoformat() for o in offs]
+        if isinstance(obj.get("day_offset_range"), dict):
+            offs = _expand_offset_range(
+                obj["day_offset_range"].get("start"),
+                obj["day_offset_range"].get("end"),
+            )
+            if offs:
+                return [(today + datetime.timedelta(days=o)).isoformat() for o in offs]
+        if isinstance(obj.get("day_offset_ranges"), list):
+            merged = []
+            for item in obj["day_offset_ranges"]:
+                if not isinstance(item, dict):
+                    continue
+                offs = _expand_offset_range(item.get("start"), item.get("end"))
+                for o in offs:
+                    resolved = (today + datetime.timedelta(days=o)).isoformat()
+                    if resolved not in merged:
+                        merged.append(resolved)
+            if merged:
+                return merged
     return []
 
 
@@ -566,6 +599,26 @@ def _collect_schedule_dates_union_run_all(schedule_defaults: dict) -> list[str]:
     elif isinstance(offs, str) and offs.strip():
         parsed_offs = _parse_offsets(offs)
         _add_many([(today + datetime.timedelta(days=o)).isoformat() for o in parsed_offs])
+
+    if schedule_defaults.get("day_offset_start") is not None or schedule_defaults.get("day_offset_end") is not None:
+        parsed_offs = _expand_offset_range(
+            schedule_defaults.get("day_offset_start"),
+            schedule_defaults.get("day_offset_end"),
+        )
+        _add_many([(today + datetime.timedelta(days=o)).isoformat() for o in parsed_offs])
+
+    day_offset_range = schedule_defaults.get("day_offset_range")
+    if isinstance(day_offset_range, dict):
+        parsed_offs = _expand_offset_range(day_offset_range.get("start"), day_offset_range.get("end"))
+        _add_many([(today + datetime.timedelta(days=o)).isoformat() for o in parsed_offs])
+
+    day_offset_ranges = schedule_defaults.get("day_offset_ranges")
+    if isinstance(day_offset_ranges, list):
+        for item in day_offset_ranges:
+            if not isinstance(item, dict):
+                continue
+            parsed_offs = _expand_offset_range(item.get("start"), item.get("end"))
+            _add_many([(today + datetime.timedelta(days=o)).isoformat() for o in parsed_offs])
 
     dates_file = schedule_defaults.get("dates_file")
     if dates_file:
@@ -843,20 +896,65 @@ def _resolve_route_search_plan(
     route_trip_overrides: list[dict[str, Any]],
     limit_dates: int | None,
 ) -> dict[str, Any]:
-    route_override = match_route_trip_override(
+    route_overrides = match_route_trip_overrides(
         route_trip_overrides,
         airline=airline_code,
         origin=route.get("origin"),
         destination=route.get("destination"),
     )
-    return resolve_route_trip_plan(
-        base_outbound_dates=base_dates,
-        base_trip_type=base_trip_type,
-        base_return_dates=base_return_dates,
-        base_return_offsets=base_return_offsets,
-        route_override=route_override,
-        limit_dates=limit_dates,
+    resolved_plans = [
+        resolve_route_trip_plan(
+            base_outbound_dates=base_dates,
+            base_trip_type=base_trip_type,
+            base_return_dates=base_return_dates,
+            base_return_offsets=base_return_offsets,
+            route_override=route_override,
+            limit_dates=limit_dates,
+        )
+        for route_override in (route_overrides or [None])
+    ]
+
+    combined_outbound_dates: list[str] = []
+    combined_return_dates: list[str] = []
+    combined_return_offsets: list[int] = []
+    combined_search_windows: list[dict[str, Any]] = []
+    seen_windows: set[tuple[str, str | None, str]] = set()
+    for plan in resolved_plans:
+        for outbound_date in plan["outbound_dates"]:
+            if outbound_date not in combined_outbound_dates:
+                combined_outbound_dates.append(outbound_date)
+        for return_date in plan["return_dates"]:
+            if return_date not in combined_return_dates:
+                combined_return_dates.append(return_date)
+        for return_offset in plan["return_offsets"]:
+            if return_offset not in combined_return_offsets:
+                combined_return_offsets.append(return_offset)
+        for window in plan["search_windows"]:
+            key = (window["departure_date"], window.get("return_date"), window.get("trip_type") or plan["trip_type"])
+            if key in seen_windows:
+                continue
+            seen_windows.add(key)
+            combined_search_windows.append(dict(window))
+
+    if not combined_outbound_dates and base_dates:
+        combined_outbound_dates = list(base_dates)
+
+    trip_types = {plan["trip_type"] for plan in resolved_plans}
+    combined_trip_type = next(iter(trip_types)) if len(trip_types) == 1 else "MIXED"
+    combined_source = (
+        resolved_plans[0]["source"]
+        if len(resolved_plans) == 1
+        else " + ".join(plan["source"] for plan in resolved_plans)
     )
+    return {
+        "trip_type": combined_trip_type,
+        "outbound_dates": combined_outbound_dates,
+        "return_dates": combined_return_dates,
+        "return_offsets": combined_return_offsets,
+        "search_windows": combined_search_windows,
+        "source": combined_source,
+        "plan_count": len(resolved_plans),
+    }
 
 
 def resolve_route_cabins(route: Dict[str, Any], airline_cfg: Dict[str, Any]) -> list[str]:
@@ -1510,7 +1608,7 @@ def main():
         if file_dates:
             dates = file_dates
         else:
-            day_offsets = [0] if args.quick else [0, 3, 5, 7, 15, 30]
+            day_offsets = [0, 3, 5, 7, 15]
             dates = [(today + datetime.timedelta(days=d)).strftime("%Y-%m-%d") for d in day_offsets]
 
     if not dates:
@@ -1534,11 +1632,12 @@ def main():
     route_trip_overrides = load_route_trip_overrides(
         Path(args.route_trip_config),
         today=today,
+        trip_plan_mode=args.trip_plan_mode,
         logger=LOG,
     )
 
     if args.quick:
-        LOG.info("Quick mode enabled: using single-day accumulation window.")
+        LOG.info("Quick mode enabled.")
     LOG.info("Accumulation dates: %s", dates)
     LOG.info("Route scope: %s (market country=%s)", args.route_scope, args.market_country)
     LOG.info("Accumulation passenger mix: ADT=%d CHD=%d INF=%d", args.adt, args.chd, args.inf)
@@ -1553,7 +1652,12 @@ def main():
     else:
         LOG.info("Trip search mode: OW")
     if route_trip_overrides:
-        LOG.info("Loaded %d route-wise trip overrides from %s", len(route_trip_overrides), args.route_trip_config)
+        LOG.info(
+            "Loaded %d route-wise trip overrides from %s (trip_plan_mode=%s)",
+            len(route_trip_overrides),
+            args.route_trip_config,
+            args.trip_plan_mode,
+        )
     if args.probe_group_id:
         LOG.info("Probe group id: %s", args.probe_group_id)
 
@@ -1606,6 +1710,7 @@ def main():
             "search_window_count": len(search_windows),
             "route_trip_override_count": len(route_trip_overrides),
             "route_trip_config": args.route_trip_config,
+            "trip_plan_mode": args.trip_plan_mode,
             "route_scope": args.route_scope,
             "market_country": args.market_country,
             "search_passengers": {"adt": int(args.adt), "chd": int(args.chd), "inf": int(args.inf)},
@@ -1708,13 +1813,14 @@ def main():
 
             if route_plan["source"] != "global":
                 LOG.info(
-                    "[%s] Route trip override applied for %s->%s: trip_type=%s outbound_dates=%d search_windows=%d source=%s",
+                    "[%s] Route trip override applied for %s->%s: trip_type=%s outbound_dates=%d search_windows=%d programs=%d source=%s",
                     code,
                     origin,
                     dest,
                     route_plan["trip_type"],
                     len(route_plan["outbound_dates"]),
                     len(route_plan["search_windows"]),
+                    int(route_plan.get("plan_count") or 1),
                     route_plan["source"],
                 )
 
@@ -1744,6 +1850,7 @@ def main():
                 for window in route_plan["search_windows"]:
                     dt = str(window["departure_date"])
                     return_date = window.get("return_date")
+                    window_trip_type = normalize_trip_type(window.get("trip_type") or route_plan["trip_type"])
                     airline_query_completed += 1
                     overall_query_completed += 1
                     run_status.update(
@@ -1785,7 +1892,7 @@ def main():
                         adt=args.adt,
                         chd=args.chd,
                         inf=args.inf,
-                        trip_type=route_plan["trip_type"],
+                        trip_type=window_trip_type,
                     )
 
                     # 1) Primary attempt: fetch_flights if provided

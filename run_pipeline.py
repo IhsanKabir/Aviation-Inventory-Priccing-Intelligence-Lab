@@ -29,6 +29,12 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run accumulation + reports as one pipeline")
     parser.add_argument("--python-exe", default=sys.executable, help="Python executable to run child scripts")
     parser.add_argument("--db-url", default=os.getenv("AIRLINE_DB_URL", DEFAULT_DATABASE_URL), help="Postgres URL")
+    parser.add_argument(
+        "--trip-plan-mode",
+        choices=["operational", "training"],
+        default=os.getenv("RUN_ALL_TRIP_PLAN_MODE", "operational"),
+        help="Trip planning mode. 'operational' uses only comparison-safe active route profiles; 'training' expands to the fuller candidate profile set including holiday overlays.",
+    )
 
     # accumulation filters
     parser.add_argument("--quick", action="store_true")
@@ -869,6 +875,7 @@ def build_scrape_cmd(args):
         _add_arg(cmd, "--date-offsets", args.date_offsets)
         _add_arg(cmd, "--dates-file", args.dates_file)
         _add_arg(cmd, "--schedule-file", args.schedule_file)
+        _add_arg(cmd, "--trip-plan-mode", args.trip_plan_mode)
         _add_arg(cmd, "--cabin", args.cabin)
         _add_arg(cmd, "--adt", args.adt)
         _add_arg(cmd, "--chd", args.chd)
@@ -896,6 +903,7 @@ def build_scrape_cmd(args):
     _add_arg(cmd, "--date-offsets", args.date_offsets)
     _add_arg(cmd, "--dates-file", args.dates_file)
     _add_arg(cmd, "--schedule-file", args.schedule_file)
+    _add_arg(cmd, "--trip-plan-mode", args.trip_plan_mode)
     _add_arg(cmd, "--cabin", args.cabin)
     _add_arg(cmd, "--adt", args.adt)
     _add_arg(cmd, "--chd", args.chd)

@@ -56,7 +56,7 @@ def parse_args():
     p.add_argument(
         "--min-completed-gap-minutes",
         type=float,
-        default=30.0,
+        default=float(os.getenv("ACCUMULATION_COMPLETION_BUFFER_MINUTES", "180")),
         help="Minimum buffer after a completed accumulation before another cycle may start",
     )
     p.add_argument("--dry-run", action="store_true")

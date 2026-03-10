@@ -650,6 +650,8 @@ export async function getRouteMonitorMatrixPayload(
   query: SnapshotQuery & {
     tripTypes?: string[];
     returnDate?: string;
+    returnDateStart?: string;
+    returnDateEnd?: string;
     routeLimit?: number;
     historyLimit?: number;
   }
@@ -663,6 +665,8 @@ export async function getRouteMonitorMatrixPayload(
       cabin: query.cabins,
       trip_type: query.tripTypes,
       return_date: query.returnDate,
+      return_date_start: query.returnDateStart,
+      return_date_end: query.returnDateEnd,
       route_limit: query.routeLimit,
       history_limit: query.historyLimit
     }),

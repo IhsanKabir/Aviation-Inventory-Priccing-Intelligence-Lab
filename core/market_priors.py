@@ -29,6 +29,8 @@ def load_market_priors(path: str | Path | None = None) -> dict[str, Any]:
         "lcc_airlines": ["6E", "G9", "3L", "8D", "FZ", "AK", "OD", "BS", "2A", "VQ", "F8"],
         "return_oriented_airlines": ["BG", "BS"],
         "yield_route_overrides": {"high": [], "tourism": [], "balanced": []},
+        "trip_date_profiles": {},
+        "holiday_windows": {},
         "horizon_windows": {
             "visa_window_max_days": 7,
             "short_max_days": 30,
@@ -47,6 +49,14 @@ def load_market_priors(path: str | Path | None = None) -> dict[str, Any]:
             y = dict(base["yield_route_overrides"])
             y.update(cfg["yield_route_overrides"])
             base["yield_route_overrides"] = y
+        if isinstance(cfg.get("trip_date_profiles"), dict):
+            profiles = dict(base["trip_date_profiles"])
+            profiles.update(cfg["trip_date_profiles"])
+            base["trip_date_profiles"] = profiles
+        if isinstance(cfg.get("holiday_windows"), dict):
+            holiday_windows = dict(base["holiday_windows"])
+            holiday_windows.update(cfg["holiday_windows"])
+            base["holiday_windows"] = holiday_windows
     return base
 
 
