@@ -36,6 +36,8 @@ type ScopeState = {
   historyLimit: string;
 };
 
+const AVAILABILITY_PREVIEW_COUNT = 6;
+
 function normalizeAirportCode(value: string) {
   return value.trim().toUpperCase();
 }
@@ -107,6 +109,37 @@ function hasExactRouteMatch(routeOptions: RouteOption[], origin: string, destina
   );
 }
 
+function buildAvailabilitySummary(items: DateAvailabilityPoint[]) {
+  if (!items.length) {
+    return {
+      totalDates: 0,
+      totalRows: 0,
+      firstDate: null,
+      lastDate: null
+    };
+  }
+  return {
+    totalDates: items.length,
+    totalRows: items.reduce((sum, item) => sum + item.row_count, 0),
+    firstDate: items[0]?.date ?? null,
+    lastDate: items[items.length - 1]?.date ?? null
+  };
+}
+
+function renderAvailabilityTitle(
+  label: string,
+  summary: { totalDates: number; totalRows: number; firstDate: string | null; lastDate: string | null }
+) {
+  if (!summary.totalDates) {
+    return label;
+  }
+  const spanLabel =
+    summary.firstDate && summary.lastDate && summary.firstDate !== summary.lastDate
+      ? `${summary.firstDate} to ${summary.lastDate}`
+      : summary.firstDate ?? "Single date";
+  return `${label} · ${summary.totalDates} dates · ${summary.totalRows} rows · ${spanLabel}`;
+}
+
 export function RouteScopeControls({
   initialState,
   tripScopeLabel,
@@ -139,11 +172,15 @@ export function RouteScopeControls({
   const searchParams = useSearchParams();
   const [isPending, startTransition] = useTransition();
   const [state, setState] = useState<ScopeState>(initialState);
+  const [showAllDepartureDates, setShowAllDepartureDates] = useState(false);
+  const [showAllReturnDates, setShowAllReturnDates] = useState(false);
 
   const syncKey = useMemo(() => JSON.stringify(initialState), [initialState]);
 
   useEffect(() => {
     setState(initialState);
+    setShowAllDepartureDates(false);
+    setShowAllReturnDates(false);
   }, [syncKey, initialState]);
 
   const queryString = useMemo(() => buildQueryString(state), [state]);
@@ -222,6 +259,17 @@ export function RouteScopeControls({
     };
     return buildReportingExportUrl(params, ["routes"]);
   }, [state]);
+  const departureSummary = useMemo(
+    () => buildAvailabilitySummary(departureDateOptions),
+    [departureDateOptions]
+  );
+  const returnSummary = useMemo(() => buildAvailabilitySummary(returnDateOptions), [returnDateOptions]);
+  const visibleDepartureDates = showAllDepartureDates
+    ? departureDateOptions
+    : departureDateOptions.slice(0, AVAILABILITY_PREVIEW_COUNT);
+  const visibleReturnDates = showAllReturnDates
+    ? returnDateOptions
+    : returnDateOptions.slice(0, AVAILABILITY_PREVIEW_COUNT);
 
   useEffect(() => {
     if (!scopeIsReady) {
@@ -510,15 +558,30 @@ export function RouteScopeControls({
 
       <div className="route-availability-grid">
         <div className="filter-group">
-          <div className="filter-label">Collected departure dates</div>
+          <div className="filter-label">
+            {renderAvailabilityTitle("Collected departure dates", departureSummary)}
+          </div>
           {availabilityOk ? (
             departureDateOptions.length ? (
-              <div className="chip-row">
-                {departureDateOptions.map((item) => (
-                  <span className="chip route-date-chip" key={`departure-${item.date}`}>
-                    {item.date} ({item.row_count})
-                  </span>
-                ))}
+              <div className="availability-section">
+                <div className="chip-row">
+                  {visibleDepartureDates.map((item) => (
+                    <span className="chip route-date-chip" key={`departure-${item.date}`}>
+                      {item.date} ({item.row_count})
+                    </span>
+                  ))}
+                </div>
+                {departureDateOptions.length > AVAILABILITY_PREVIEW_COUNT ? (
+                  <button
+                    className="availability-toggle"
+                    onClick={() => setShowAllDepartureDates((current) => !current)}
+                    type="button"
+                  >
+                    {showAllDepartureDates
+                      ? "Show fewer departure dates"
+                      : `Show all ${departureDateOptions.length} departure dates`}
+                  </button>
+                ) : null}
               </div>
             ) : (
               <div className="empty-state">No collected departure dates for the current scope.</div>
@@ -534,15 +597,30 @@ export function RouteScopeControls({
 
         {state.tripType === "RT" ? (
           <div className="filter-group">
-            <div className="filter-label">Collected return dates</div>
+            <div className="filter-label">
+              {renderAvailabilityTitle("Collected return dates", returnSummary)}
+            </div>
             {availabilityOk ? (
               returnDateOptions.length ? (
-                <div className="chip-row">
-                  {returnDateOptions.map((item) => (
-                    <span className="chip route-date-chip" key={`return-${item.date}`}>
-                      {item.date} ({item.row_count})
-                    </span>
-                  ))}
+                <div className="availability-section">
+                  <div className="chip-row">
+                    {visibleReturnDates.map((item) => (
+                      <span className="chip route-date-chip" key={`return-${item.date}`}>
+                        {item.date} ({item.row_count})
+                      </span>
+                    ))}
+                  </div>
+                  {returnDateOptions.length > AVAILABILITY_PREVIEW_COUNT ? (
+                    <button
+                      className="availability-toggle"
+                      onClick={() => setShowAllReturnDates((current) => !current)}
+                      type="button"
+                    >
+                      {showAllReturnDates
+                        ? "Show fewer return dates"
+                        : `Show all ${returnDateOptions.length} return dates`}
+                    </button>
+                  ) : null}
                 </div>
               ) : (
                 <div className="empty-state">No collected round-trip return dates for the current scope.</div>

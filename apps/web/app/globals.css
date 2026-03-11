@@ -627,10 +627,38 @@ a {
   gap: 16px;
 }
 
+.availability-section {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(16, 35, 59, 0.08);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
 .route-date-chip {
   min-height: 34px;
   padding: 8px 12px;
   cursor: default;
+}
+
+.availability-toggle {
+  width: fit-content;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(16, 35, 59, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.availability-toggle:hover {
+  border-color: rgba(16, 35, 59, 0.24);
+  background: rgba(255, 255, 255, 0.92);
 }
 
 .route-hint-chip {
