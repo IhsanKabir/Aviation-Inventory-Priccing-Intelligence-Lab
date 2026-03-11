@@ -253,6 +253,7 @@ export default async function RoutesPage({ searchParams }: PageProps) {
   const departureDateOptions = availability.data?.departure_dates ?? [];
   const returnDateOptions = availability.data?.return_dates ?? [];
   const returnDateMap = buildDateAvailabilityMap(returnDateOptions);
+  const availabilityEndpointMissing = !availability.ok && (availability.error ?? "").startsWith("404");
   const selectedReturnDateUnavailable =
     tripType === "RT" &&
     returnScope === "exact" &&
@@ -344,26 +345,30 @@ export default async function RoutesPage({ searchParams }: PageProps) {
                   <option value="RT">Round-trip</option>
                 </select>
               </label>
-              <label className="field">
-                <span>Return scope</span>
-                <select defaultValue={returnScope} name="return_scope">
-                  <option value="any">Any collected return</option>
-                  <option value="exact">Single return date</option>
-                  <option value="range">Return date range</option>
-                </select>
-              </label>
-              <label className="field">
-                <span>Return date</span>
-                <input defaultValue={returnDate ?? ""} name="return_date" type="date" />
-              </label>
-              <label className="field">
-                <span>Return start</span>
-                <input defaultValue={returnDateStart ?? ""} name="return_date_start" type="date" />
-              </label>
-              <label className="field">
-                <span>Return end</span>
-                <input defaultValue={returnDateEnd ?? ""} name="return_date_end" type="date" />
-              </label>
+              {tripType === "RT" ? (
+                <>
+                  <label className="field">
+                    <span>Return scope</span>
+                    <select defaultValue={returnScope} name="return_scope">
+                      <option value="any">Any collected return</option>
+                      <option value="exact">Single return date</option>
+                      <option value="range">Return date range</option>
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>Return date</span>
+                    <input defaultValue={returnDate ?? ""} name="return_date" type="date" />
+                  </label>
+                  <label className="field">
+                    <span>Return start</span>
+                    <input defaultValue={returnDateStart ?? ""} name="return_date_start" type="date" />
+                  </label>
+                  <label className="field">
+                    <span>Return end</span>
+                    <input defaultValue={returnDateEnd ?? ""} name="return_date_end" type="date" />
+                  </label>
+                </>
+              ) : null}
               <label className="field">
                 <span>Route blocks</span>
                 <input defaultValue={String(routeLimit)} inputMode="numeric" name="route_limit" pattern="[0-9]*" type="text" />
@@ -402,6 +407,8 @@ export default async function RoutesPage({ searchParams }: PageProps) {
                   ) : (
                     <div className="empty-state">No collected departure dates for the current scope.</div>
                   )
+                ) : availabilityEndpointMissing ? (
+                  <div className="empty-state">Date availability is not available on the current API revision yet.</div>
                 ) : (
                   <div className="empty-state error-state">
                     Availability error: {availability.error ?? "Unable to inspect collected dates."}
@@ -423,6 +430,8 @@ export default async function RoutesPage({ searchParams }: PageProps) {
                     ) : (
                       <div className="empty-state">No collected round-trip return dates for the current scope.</div>
                     )
+                  ) : availabilityEndpointMissing ? (
+                    <div className="empty-state">Date availability is not available on the current API revision yet.</div>
                   ) : (
                     <div className="empty-state error-state">
                       Availability error: {availability.error ?? "Unable to inspect collected return dates."}
