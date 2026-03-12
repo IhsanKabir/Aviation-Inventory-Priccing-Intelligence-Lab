@@ -780,3 +780,75 @@ Architectural guidance:
 Execution note:
 
 - Implementation should follow the priority order defined in [docs/WEB_PRODUCT_REQUIREMENTS.md](docs/WEB_PRODUCT_REQUIREMENTS.md), starting with navigation correctness, comparison ordering, and scan-first market review UX.
+
+## 16) Stability Remediation Roadmap (2026-03-12)
+
+The platform has reached the point where operational reliability is a bigger risk
+than raw feature breadth. The next decisions therefore prioritize:
+
+1. one trustworthy operational status source
+2. one trustworthy scheduler truth model
+3. one stable PostgreSQL runtime on the operational machine
+4. one explicit config-resolution model that operators can reason about quickly
+
+### Critical This Week
+
+These items are now the highest-priority stability work:
+
+1. Create one authoritative aggregate cycle status artifact.
+   - `run_all_status_latest.json` is not sufficient when parallel workers are active.
+   - The system needs a cycle-level aggregate status file derived from the parallel runner output.
+   - Health pages, route freshness, and operational decisions must prefer the aggregate artifact over per-worker last-write files.
+
+2. Harden PostgreSQL operations on the main machine.
+   - PostgreSQL service uptime is now a hard dependency for ingestion, post-run validation, and local truth.
+   - Treat local service health, data-directory permissions, and startup checks as operational prerequisites.
+   - The scheduler should not start a cycle unless PostgreSQL connectivity passes first.
+
+3. Prove no-overlap behavior empirically.
+   - Guarded wrapper logic is now in place, but the next validation standard is operational:
+     - one launch
+     - one finish or one skip
+     - no duplicate `starting ingestion cycle` sequence without a finish/skip in between
+
+4. Separate business-facing freshness from worker-level activity.
+   - User-facing pages must not infer "latest healthy cycle" from partial worker artifacts.
+   - Comparable-cycle selection should remain based on complete, aggregate, comparison-eligible cycles only.
+
+### Stability Next
+
+After the critical items above, the next stability layer is:
+
+1. Add a config linter for trip planning.
+   - Validate `dates.json`, `market_priors.json`, and `route_trip_windows.json` together.
+   - Detect contradictory profile activation, missing profile names, impossible ranges, and unexpectedly large expansion factors.
+
+2. Publish deployment/runtime identity clearly.
+   - Expose current API revision, web build SHA, latest warehouse sync timestamp, and latest comparable cycle timestamp.
+   - This reduces confusion between stale deploys, stale warehouse state, and true data absence.
+
+3. Make training/deep lanes first-class run products.
+   - `operational`, `training`, and `deep` now exist structurally.
+   - Their next step is independent status/reporting artifacts so operators can tell which lane is healthy without reading logs.
+
+4. Keep deep enrichment opportunistic.
+   - Deep mode is broad by design and should not be treated as a guaranteed fixed-slot run on a single training laptop.
+   - Core daily training remains the stable training lane; deep remains opportunistic or event-driven.
+
+### Architecture Later
+
+Longer-term, the preferred architectural direction is:
+
+1. centralize operational PostgreSQL away from a fragile local single-laptop dependency
+2. keep one aggregate cycle registry with explicit run kind and comparison eligibility
+3. move from implicit schedule slots to finish-plus-buffer launch semantics everywhere
+4. keep route and trip config rich, but expose machine-readable guardrails before execution
+
+### Immediate Operating Rule
+
+Until the roadmap above is complete:
+
+- trust aggregate cycle outputs over worker-local status files
+- treat PostgreSQL service health as a blocker, not a warning
+- let guarded wrappers skip rather than force launches
+- prefer fewer clean cycles over more ambiguous cycles

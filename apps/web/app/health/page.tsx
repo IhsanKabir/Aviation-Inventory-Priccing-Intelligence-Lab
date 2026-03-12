@@ -8,6 +8,7 @@ export default async function HealthPage() {
   const data = result.data;
   const runStatus = data?.latest_run_status;
   const runMatchesLatestCycle = runStatus?.matches_latest_cycle !== false;
+  const runStatusSource = runStatus?.status_source ?? "worker_heartbeat";
   const latestRunRows = runStatus?.total_rows_accumulated;
   const showRunRowsAsReported =
     runMatchesLatestCycle &&
@@ -18,9 +19,22 @@ export default async function HealthPage() {
   const runRowsTone = showRunRowsAsReported ? "good" : "warn";
   const runRowsContext = !runStatus
     ? "No latest run status file"
+    : runStatusSource === "parallel_aggregate"
+      ? "Whole-cycle aggregate artifact from the parallel airline runner"
     : !runMatchesLatestCycle
       ? "Status file belongs to an older cycle, not the latest cycle"
       : "Accumulated row count from latest aligned run status";
+  const queryCompletionValue =
+    runStatus?.overall_query_completed !== null && runStatus?.overall_query_completed !== undefined
+      ? `${formatNumber(runStatus.overall_query_completed)} / ${formatNumber(runStatus.overall_query_total ?? 0)}`
+      : runStatusSource === "parallel_aggregate" && runStatus?.aggregate_airline_count !== null && runStatus?.aggregate_airline_count !== undefined
+        ? `${formatNumber(runStatus.aggregate_airline_count)} airlines`
+        : "-";
+  const queryCompletionFootnote = !runStatus
+    ? "No latest run status file"
+    : runStatusSource === "parallel_aggregate"
+      ? `aggregate parallel / ${formatNumber(runStatus.aggregate_failed_count ?? 0)} failed`
+      : `${runStatus.state ?? "-"} / ${runStatus.phase ?? "-"}`;
 
   return (
     <>
@@ -48,12 +62,8 @@ export default async function HealthPage() {
         />
         <MetricCard
           label="Query completion"
-          value={
-            runStatus?.overall_query_completed !== null && runStatus?.overall_query_completed !== undefined
-              ? `${formatNumber(runStatus.overall_query_completed)} / ${formatNumber(runStatus.overall_query_total ?? 0)}`
-              : "-"
-          }
-          footnote={runStatus?.state ? `${runStatus.state} / ${runStatus.phase ?? "-"}` : "No latest run status file"}
+          value={queryCompletionValue}
+          footnote={queryCompletionFootnote}
         />
       </div>
 

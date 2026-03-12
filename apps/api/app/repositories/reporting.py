@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 ROUTES_CONFIG_PATH = REPO_ROOT / "config" / "routes.json"
 AIRPORT_COUNTRIES_CONFIG_PATH = REPO_ROOT / "config" / "airport_countries.json"
 RUN_STATUS_LATEST_PATH = REPO_ROOT / "output" / "reports" / "run_all_status_latest.json"
+SCRAPE_PARALLEL_LATEST_PATH = REPO_ROOT / "output" / "reports" / "scrape_parallel_latest.json"
 REPORTS_ROOT = REPO_ROOT / "output" / "reports"
 PREDICTION_EVAL_RE = re.compile(r"^prediction_eval_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
 PREDICTION_NEXT_RE = re.compile(r"^prediction_next_day_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
@@ -698,6 +699,65 @@ def _load_latest_run_status() -> dict[str, Any] | None:
         return None
 
 
+def _load_latest_parallel_status() -> dict[str, Any] | None:
+    try:
+        payload = json.loads(SCRAPE_PARALLEL_LATEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _build_cycle_run_status(
+    *,
+    cycle_id: str,
+    latest_cycle: Mapping[str, Any],
+    worker_status: dict[str, Any] | None,
+    parallel_status: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    worker_cycle_id = str(worker_status.get("cycle_id") or worker_status.get("scrape_id") or "") if worker_status else ""
+    worker_matches_latest = worker_cycle_id == cycle_id
+
+    parallel_cycle_id = str(parallel_status.get("cycle_id") or "") if parallel_status else ""
+    parallel_matches_latest = parallel_cycle_id == cycle_id
+
+    if parallel_matches_latest:
+        selected_dates = worker_status.get("selected_dates") if worker_matches_latest and worker_status else None
+        return {
+            "cycle_id": cycle_id,
+            "state": "completed",
+            "phase": "aggregate_parallel",
+            "overall_query_total": None,
+            "overall_query_completed": None,
+            "total_rows_accumulated": latest_cycle.get("offer_rows"),
+            "completed_at_utc": parallel_status.get("completed_at_utc") or latest_cycle.get("cycle_completed_at_utc"),
+            "selected_dates": selected_dates,
+            "matches_latest_cycle": True,
+            "status_source": "parallel_aggregate",
+            "aggregate_airline_count": parallel_status.get("airline_count"),
+            "aggregate_failed_count": parallel_status.get("failed_count"),
+            "duration_sec": parallel_status.get("duration_sec"),
+        }
+
+    if worker_status:
+        return {
+            "cycle_id": worker_status.get("cycle_id") or worker_status.get("scrape_id"),
+            "state": worker_status.get("state"),
+            "phase": worker_status.get("phase"),
+            "overall_query_total": worker_status.get("overall_query_total"),
+            "overall_query_completed": worker_status.get("overall_query_completed"),
+            "total_rows_accumulated": worker_status.get("total_rows_accumulated"),
+            "completed_at_utc": worker_status.get("completed_at_utc"),
+            "selected_dates": worker_status.get("selected_dates"),
+            "matches_latest_cycle": worker_matches_latest,
+            "status_source": "worker_heartbeat",
+            "aggregate_airline_count": None,
+            "aggregate_failed_count": None,
+            "duration_sec": None,
+        }
+
+    return None
+
+
 def get_cycle_health(session: Session | None) -> dict[str, Any]:
     latest_cycle = get_latest_cycle(session)
     if not latest_cycle:
@@ -761,7 +821,14 @@ def get_cycle_health(session: Session | None) -> dict[str, Any]:
         stale = cycle_age_minutes > 180
 
     coverage_pct = round((len(observed_set) / len(configured_set) * 100.0), 2) if configured_set else 0.0
-    run_status = _load_latest_run_status()
+    worker_status = _load_latest_run_status()
+    parallel_status = _load_latest_parallel_status()
+    run_status = _build_cycle_run_status(
+        cycle_id=cycle_id,
+        latest_cycle=latest_cycle,
+        worker_status=worker_status,
+        parallel_status=parallel_status,
+    )
 
     return {
         "database_ok": session is not None or _bigquery_ready(),
@@ -777,17 +844,7 @@ def get_cycle_health(session: Session | None) -> dict[str, Any]:
         "observed_route_pair_count": len(observed_set),
         "route_pair_coverage_pct": coverage_pct,
         "missing_route_pairs": missing_route_pairs[:60],
-        "latest_run_status": {
-            "cycle_id": run_status.get("cycle_id") or run_status.get("scrape_id"),
-            "state": run_status.get("state"),
-            "phase": run_status.get("phase"),
-            "overall_query_total": run_status.get("overall_query_total"),
-            "overall_query_completed": run_status.get("overall_query_completed"),
-            "total_rows_accumulated": run_status.get("total_rows_accumulated"),
-            "completed_at_utc": run_status.get("completed_at_utc"),
-            "selected_dates": run_status.get("selected_dates"),
-            "matches_latest_cycle": str(run_status.get("cycle_id") or run_status.get("scrape_id") or "") == cycle_id,
-        } if run_status else None,
+        "latest_run_status": run_status,
     }
 
 

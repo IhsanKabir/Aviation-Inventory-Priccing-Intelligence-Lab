@@ -118,6 +118,45 @@ Immediate runtime-reduction priorities:
 4. Keep prediction and sync enabled; they are not the primary runtime cost.
 5. Only expand round-trip coverage after one-way baseline runtime is under control.
 
+## Current Stability Priorities
+
+Until the platform is further hardened, use this order of trust during incidents:
+
+1. PostgreSQL service health
+2. aggregate parallel-run artifact
+3. guarded wrapper / lock state
+4. worker-local heartbeat files
+
+Meaning:
+
+- if PostgreSQL is down, do not trust post-run coverage summaries
+- if worker-local status disagrees with aggregate parallel output, trust the aggregate artifact
+- if a wrapper lock exists and heartbeat is fresh, do not force another launch
+
+### Incident Triage Order
+
+1. Check PostgreSQL service and connectivity first.
+2. Check aggregate parallel output for the last cycle.
+3. Check guarded-wrapper/recovery state.
+4. Only then inspect per-worker heartbeat files.
+
+Recommended checks:
+
+```powershell
+Get-Service *postgres*
+.\.venv\Scripts\python.exe -c "import db; s=db.get_session(); print('db_ok'); s.close()"
+Get-Content output\reports\scrape_parallel_latest.json -TotalCount 120
+Get-Content output\reports\run_all_status_latest.json -TotalCount 80
+Get-Content output\reports\accumulation_wrapper_lock.json
+Get-Content output\reports\run_all_accumulation_status_latest.json -TotalCount 80
+```
+
+Interpretation:
+
+- `scrape_parallel_latest.json` is the better source for whole-cycle airline coverage and worker outcomes.
+- `run_all_status_latest.json` may only reflect the last worker heartbeat, not the full parallel cycle.
+- `run_all_accumulation_status_latest.json` is the wrapper/accumulation heartbeat, not the final source of whole-cycle truth.
+
 ## Operational vs Training Cycles
 
 The collection stack now supports two trip-planning modes:

@@ -37,6 +37,10 @@ export type CycleHealthPayload = {
     completed_at_utc?: string | null;
     selected_dates?: string[] | null;
     matches_latest_cycle?: boolean | null;
+    status_source?: string | null;
+    aggregate_airline_count?: number | null;
+    aggregate_failed_count?: number | null;
+    duration_sec?: number | null;
   } | null;
 };
 
