@@ -155,6 +155,20 @@ If you want to change what a profile means:
 If you want to change the default outbound date universe:
 - edit `dates.json`
 
+## Validation
+
+Before changing scheduler-facing trip config, run:
+
+```powershell
+.\.venv\Scripts\python.exe tools\validate_trip_config.py
+```
+
+This catches:
+- unknown profile references
+- route keys not present in `config/routes.json`
+- duplicate profile names in profile arrays
+- missing route-window entries for configured airline-route pairs
+
 ## Current Operational Pattern
 
 The current design separates:
