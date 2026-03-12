@@ -59,23 +59,23 @@ if [[ -f "$RECOVERY_HELPER" ]]; then
   PRE_RC=$?
   set -e
   if [[ -f "$RECOVERY_STATUS" && -f "$CYCLE_STATE" ]]; then
-    "$PYEXE" -c "import json, pathlib, datetime; p=json.loads(pathlib.Path(r'$RECOVERY_STATUS').read_text(encoding='utf-8')); c=json.loads(pathlib.Path(r'$CYCLE_STATE').read_text(encoding='utf-8')); print(f'[{datetime.datetime.now().strftime(\"%Y-%m-%d %H:%M:%S\")}] deep wrapper summary: state={c.get(\"state\")} action={p.get(\"action\")} reason={p.get(\"reason\")} cycle_id={c.get(\"cycle_id\")} launched={p.get(\"launched\")} db_ok={(p.get(\"db_check\") or {}).get(\"ok\")} rc=$PRE_RC')" >> "$LOGFILE" 2>&1
+    "$PYEXE" -c "import json, pathlib, datetime; p=json.loads(pathlib.Path(r'$RECOVERY_STATUS').read_text(encoding='utf-8')); c=json.loads(pathlib.Path(r'$CYCLE_STATE').read_text(encoding='utf-8')); print(f'[{datetime.datetime.now().strftime(\"%Y-%m-%d %H:%M:%S\")}] deep wrapper result: event={p.get(\"wrapper_event\")} state={c.get(\"state\")} reason={p.get(\"reason\")} cycle_id={c.get(\"cycle_id\")} launched={p.get(\"launched\")} db_ok={(p.get(\"db_check\") or {}).get(\"ok\")} rc=$PRE_RC')" >> "$LOGFILE" 2>&1
   fi
 
   if [[ "$PRE_RC" -eq 10 ]]; then
-    echo "[$(timestamp)] deep training skipped: active or fresh accumulation already present" >> "$LOGFILE"
+    echo "[$(timestamp)] deep wrapper result: event=skipped_active_run rc=0" >> "$LOGFILE"
     exit 0
   fi
   if [[ "$PRE_RC" -eq 11 ]]; then
-    echo "[$(timestamp)] deep training skipped: ${DEEP_COMPLETION_BUFFER_MINUTES} minute post-completion buffer is active" >> "$LOGFILE"
+    echo "[$(timestamp)] deep wrapper result: event=skipped_buffer rc=0" >> "$LOGFILE"
     exit 0
   fi
   if [[ "$PRE_RC" -eq 12 ]]; then
-    echo "[$(timestamp)] deep training skipped: PostgreSQL is unavailable" >> "$LOGFILE"
+    echo "[$(timestamp)] deep wrapper result: event=skipped_db_unavailable rc=0" >> "$LOGFILE"
     exit 0
   fi
   if [[ "$PRE_RC" -ne 0 ]]; then
-    echo "[$(timestamp)] deep training preflight warning rc=$PRE_RC (continuing)" >> "$LOGFILE"
+    echo "[$(timestamp)] deep wrapper result: event=preflight_warning rc=$PRE_RC (continuing)" >> "$LOGFILE"
   fi
 fi
 
@@ -97,5 +97,9 @@ fi
 "${cmd[@]}" >> "$LOGFILE" 2>&1
 RC=$?
 set -e
-echo "[$(timestamp)] deep training cycle finished rc=$RC" >> "$LOGFILE"
+if [[ "$RC" -eq 0 ]]; then
+  echo "[$(timestamp)] deep wrapper result: event=wrapper_finished_success rc=0" >> "$LOGFILE"
+else
+  echo "[$(timestamp)] deep wrapper result: event=wrapper_finished_failure rc=$RC" >> "$LOGFILE"
+fi
 exit "$RC"

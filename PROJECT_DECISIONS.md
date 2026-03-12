@@ -128,6 +128,23 @@ Mandatory for analysis (minimum set):
 - Phase 1: human decision support
 - Phase 2: semi-automated actions
 
+### Semi-Automated Extraction Strategy (Next Phase)
+
+- Semi-automated/manual-fragment sources should move into a dedicated human-in-the-loop extraction lane after the current ingestion/scheduler/database stack is stable.
+- The preferred design is an AI-agent-assisted operator workflow:
+  - an operator or AI agent handles the manual/challenge-sensitive step
+  - orchestration is handled through automation tooling such as Power Automate, n8n, or a similar workflow engine
+  - the workflow should produce structured outputs that feed back into the same canonical normalization and warehouse path as fully automated sources
+- This lane is intended for sources where:
+  - anti-bot behavior blocks safe full automation
+  - a human confirmation step is still required
+  - semi-structured/manual UI actions remain cheaper than building brittle scrapers
+- "Google AntiGravity" or similar external agentic/browser automation capabilities may be evaluated as an R&D input for this lane, but they are exploratory only and not a current production dependency.
+- This work is explicitly phase-gated:
+  - do not start before the current automated system is stable
+  - stabilize scheduler truth, PostgreSQL health, aggregate reporting truth, and training/deep separation first
+  - only then add the semi-automated operator/agent workflow as a separate ingestion class
+
 ### Accuracy Evaluation Intent
 
 - Compare prediction for future date/time with actual observed data when that time arrives

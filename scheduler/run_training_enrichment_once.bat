@@ -50,22 +50,22 @@ if exist "%RECOVERY_HELPER%" (
   "%PYEXE%" "%RECOVERY_HELPER%" --mode preflight --python-exe "%PYEXE%" --root "%ROOT%" --reports-dir "%ROOT%\output\reports" --min-completed-gap-minutes "%TRAINING_COMPLETION_BUFFER_MINUTES%" >> "%LOGFILE%" 2>&1
   set "PRE_RC=%ERRORLEVEL%"
   if exist "%RECOVERY_STATUS%" if exist "%CYCLE_STATE%" (
-    powershell -NoProfile -Command "$p = Get-Content -Raw '%RECOVERY_STATUS%' | ConvertFrom-Json; $c = Get-Content -Raw '%CYCLE_STATE%' | ConvertFrom-Json; $msg = ('[{0} {1}] training wrapper summary: state={2} action={3} reason={4} cycle_id={5} launched={6} db_ok={7} rc={8}' -f (Get-Date -Format 'ddd MM/dd/yyyy'), (Get-Date -Format 'HH:mm:ss.ff'), $c.state, $p.action, $p.reason, $c.cycle_id, $p.launched, $p.db_check.ok, '!PRE_RC!'); Add-Content -Path '%LOGFILE%' -Value $msg" >nul 2>&1
+    powershell -NoProfile -Command "$p = Get-Content -Raw '%RECOVERY_STATUS%' | ConvertFrom-Json; $c = Get-Content -Raw '%CYCLE_STATE%' | ConvertFrom-Json; $msg = ('[{0} {1}] training wrapper result: event={2} state={3} reason={4} cycle_id={5} launched={6} db_ok={7} rc={8}' -f (Get-Date -Format 'ddd MM/dd/yyyy'), (Get-Date -Format 'HH:mm:ss.ff'), $p.wrapper_event, $c.state, $p.reason, $c.cycle_id, $p.launched, $p.db_check.ok, '!PRE_RC!'); Add-Content -Path '%LOGFILE%' -Value $msg" >nul 2>&1
   )
   if "!PRE_RC!"=="10" (
-    echo [%date% %time%] training enrichment skipped: active or fresh accumulation already present>> "%LOGFILE%"
+    echo [%date% %time%] training wrapper result: event=skipped_active_run rc=0>> "%LOGFILE%"
     exit /b 0
   )
   if "!PRE_RC!"=="11" (
-    echo [%date% %time%] training enrichment skipped: %TRAINING_COMPLETION_BUFFER_MINUTES% minute post-completion buffer is active>> "%LOGFILE%"
+    echo [%date% %time%] training wrapper result: event=skipped_buffer rc=0>> "%LOGFILE%"
     exit /b 0
   )
   if "!PRE_RC!"=="12" (
-    echo [%date% %time%] training enrichment skipped: PostgreSQL is unavailable>> "%LOGFILE%"
+    echo [%date% %time%] training wrapper result: event=skipped_db_unavailable rc=0>> "%LOGFILE%"
     exit /b 0
   )
   if not "!PRE_RC!"=="0" (
-    echo [%date% %time%] training preflight warning rc=!PRE_RC! (continuing)>> "%LOGFILE%"
+    echo [%date% %time%] training wrapper result: event=preflight_warning rc=!PRE_RC! (continuing)>> "%LOGFILE%"
   )
 )
 
@@ -76,5 +76,9 @@ if /I "%TRAINING_SKIP_BIGQUERY_SYNC%"=="1" (
   "%PYEXE%" "%ROOT%\run_pipeline.py" --python-exe "%PYEXE%" --trip-plan-mode training --skip-reports --report-output-dir "%ROOT%\output\reports" --report-timestamp-tz local --prediction-ml-models "%TRAINING_PREDICTION_ML_MODELS%" --prediction-dl-models "%TRAINING_PREDICTION_DL_MODELS%" >> "%LOGFILE%" 2>&1
 )
 set "RC=%ERRORLEVEL%"
-echo [%date% %time%] training enrichment cycle finished rc=!RC!>> "%LOGFILE%"
+if "!RC!"=="0" (
+  echo [%date% %time%] training wrapper result: event=wrapper_finished_success rc=0>> "%LOGFILE%"
+) else (
+  echo [%date% %time%] training wrapper result: event=wrapper_finished_failure rc=!RC!>> "%LOGFILE%"
+)
 exit /b !RC!

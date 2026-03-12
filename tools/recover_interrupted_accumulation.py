@@ -426,6 +426,51 @@ def _minutes_since_last_attempt(state: dict) -> float | None:
     return max(0.0, (_now_utc() - ts.astimezone(dt.timezone.utc)).total_seconds() / 60.0)
 
 
+def _derive_wrapper_event(action: str, reason: str, launched: bool) -> str:
+    action = str(action or "").strip().lower()
+    reason = str(reason or "").strip().lower()
+    if action == "launch" and launched:
+        if reason.startswith("stale_running_heartbeat"):
+            return "recovered_stale_heartbeat"
+        if reason.startswith("idle_gap_exceeded"):
+            return "recovered_idle_gap"
+        if reason.startswith("no_heartbeat_found"):
+            return "launched_new_cycle_no_heartbeat"
+        return "launched_new_cycle"
+    if action == "skip":
+        if "postgres_unreachable" in reason:
+            return "skipped_db_unavailable"
+        if "completed_buffer_active" in reason:
+            return "skipped_buffer"
+        if (
+            "active_pipeline_process_detected" in reason
+            or "fresh_running_heartbeat" in reason
+            or "wrapper_lock_present" in reason
+            or "lock_acquire_failed" in reason
+        ):
+            return "skipped_active_run"
+        return "skipped_other"
+    if action == "none":
+        if "postgres_unreachable" in reason:
+            return "recovery_wait_db_unavailable"
+        if "completed_buffer_active" in reason:
+            return "recovery_wait_buffer"
+        if "fresh_running_heartbeat" in reason or "active_pipeline_process_detected" in reason:
+            return "recovery_wait_active_run"
+        if "cooldown_active" in reason:
+            return "recovery_wait_cooldown"
+        return "recovery_noop"
+    if action == "ok":
+        return "preflight_ready"
+    if action == "completed":
+        return "wrapper_finished_success"
+    if action == "failed":
+        return "wrapper_finished_failure"
+    if action == "error":
+        return "wrapper_error"
+    return "wrapper_unknown"
+
+
 def _build_status(
     *,
     mode: str,
@@ -444,6 +489,7 @@ def _build_status(
     hb_age = _heartbeat_age_minutes(heartbeat) if heartbeat else None
     lock_payload = _read_json(lock_file) if lock_file and lock_file.exists() else {}
     lock_age = _lock_age_minutes(lock_file, lock_payload) if lock_file else None
+    wrapper_event = _derive_wrapper_event(action, reason, bool(launched))
     return {
         "mode": mode,
         "root": str(root),
@@ -468,6 +514,7 @@ def _build_status(
         "lock_created_at_utc": lock_payload.get("created_at_utc") if lock_payload else None,
         "db_check": db_check or {},
         "action": action,
+        "wrapper_event": wrapper_event,
         "reason": reason,
         "launched": bool(launched),
         "checked_at_utc": _now_utc().isoformat(),
@@ -495,6 +542,7 @@ def _build_cycle_state_payload(
         "status_source": "wrapper_cycle_state",
         "mode": base_payload.get("mode"),
         "action": base_payload.get("action"),
+        "wrapper_event": base_payload.get("wrapper_event"),
         "reason": base_payload.get("reason"),
         "checked_at_utc": base_payload.get("checked_at_utc"),
         "cycle_id": cycle_id,

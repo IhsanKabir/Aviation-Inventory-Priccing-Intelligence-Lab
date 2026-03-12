@@ -71,3 +71,16 @@ Get-Content output\reports\smoke_check_latest.json
 - No stale route-monitor scrape selection.
 - Manual-assisted queue outputs are written with clear success/failure counts.
 - `tools/check_git_hygiene.py` reports zero tracked runtime artifacts.
+
+## Next-Phase Note
+
+- After the current system is stable, semi-automated/manual-fragment sources should move to an AI-agent-assisted operator lane.
+- Candidate orchestration tools:
+  - Power Automate
+  - n8n
+  - similar workflow/desktop automation tools
+- Intended pattern:
+  - operator or AI agent completes the manual/challenge-sensitive action
+  - workflow captures normalized structured output
+  - output re-enters the same downstream ingestion/reporting path
+- "Google AntiGravity" or similar agentic/browser-assist tooling may be evaluated in that phase as an exploratory accelerator, not as a current operating dependency.
