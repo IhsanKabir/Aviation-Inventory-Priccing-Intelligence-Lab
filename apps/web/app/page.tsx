@@ -26,6 +26,22 @@ function formatDate(value?: string | null) {
   }).format(new Date(value));
 }
 
+function formatDurationSeconds(value?: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return "Not available";
+  }
+  const totalMinutes = Math.round(value / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours <= 0) {
+    return `${minutes} min`;
+  }
+  if (minutes === 0) {
+    return `${hours} hr`;
+  }
+  return `${hours} hr ${minutes} min`;
+}
+
 export default async function HomePage() {
   const payload = await getDashboardPayload();
   const latestCycle = payload.latestCycle.data;
@@ -35,6 +51,16 @@ export default async function HomePage() {
     .sort((left, right) => (right.offer_rows ?? 0) - (left.offer_rows ?? 0) || left.route_key.localeCompare(right.route_key));
   const health = payload.health.data;
   const cycleHealth = payload.cycleHealth.data;
+  const latestRunStatus = cycleHealth?.latest_run_status;
+  const isAggregateRunStatus = latestRunStatus?.status_source === "parallel_aggregate";
+  const runStatusSummary = isAggregateRunStatus
+    ? `${latestRunStatus?.aggregate_airline_count ?? 0} airlines`
+    : latestRunStatus?.overall_query_total
+      ? `${latestRunStatus?.overall_query_completed ?? 0}/${latestRunStatus.overall_query_total} queries`
+      : "Not reported";
+  const runStatusFootnote = isAggregateRunStatus
+    ? `${latestRunStatus?.aggregate_failed_count ?? 0} failed`
+    : latestRunStatus?.phase ?? "Worker heartbeat";
 
   return (
     <>
@@ -97,6 +123,16 @@ export default async function HomePage() {
                 {cycleHealth?.route_pair_coverage_pct?.toFixed(1) ?? "0.0"}%
               </div>
               <span>{(cycleHealth?.observed_route_pair_count ?? 0).toLocaleString()} observed</span>
+            </div>
+            <div className="table-row">
+              <div>
+                <strong>Run truth</strong>
+                <span>{isAggregateRunStatus ? "Aggregate parallel artifact" : "Worker heartbeat fallback"}</span>
+              </div>
+              <div className={`pill ${isAggregateRunStatus ? "good" : "warn"}`}>
+                {runStatusSummary}
+              </div>
+              <span>{formatDurationSeconds(latestRunStatus?.duration_sec)} · {runStatusFootnote}</span>
             </div>
           </div>
         </DataPanel>
