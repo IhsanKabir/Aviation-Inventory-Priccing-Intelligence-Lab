@@ -23,6 +23,7 @@ ROUTES_CONFIG_PATH = REPO_ROOT / "config" / "routes.json"
 AIRPORT_COUNTRIES_CONFIG_PATH = REPO_ROOT / "config" / "airport_countries.json"
 RUN_STATUS_LATEST_PATH = REPO_ROOT / "output" / "reports" / "run_all_status_latest.json"
 SCRAPE_PARALLEL_LATEST_PATH = REPO_ROOT / "output" / "reports" / "scrape_parallel_latest.json"
+ACCUMULATION_CYCLE_LATEST_PATH = REPO_ROOT / "output" / "reports" / "accumulation_cycle_latest.json"
 REPORTS_ROOT = REPO_ROOT / "output" / "reports"
 PREDICTION_EVAL_RE = re.compile(r"^prediction_eval_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
 PREDICTION_NEXT_RE = re.compile(r"^prediction_next_day_(?P<target>.+)_(?P<stamp>\d{8}_\d{6})\.csv$")
@@ -707,18 +708,48 @@ def _load_latest_parallel_status() -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _load_latest_cycle_wrapper_status() -> dict[str, Any] | None:
+    try:
+        payload = json.loads(ACCUMULATION_CYCLE_LATEST_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def _build_cycle_run_status(
     *,
     cycle_id: str,
     latest_cycle: Mapping[str, Any],
+    wrapper_status: dict[str, Any] | None,
     worker_status: dict[str, Any] | None,
     parallel_status: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
+    wrapper_cycle_id = str(wrapper_status.get("cycle_id") or wrapper_status.get("accumulation_run_id") or "") if wrapper_status else ""
+    wrapper_matches_latest = wrapper_cycle_id == cycle_id
+    wrapper_state = str(wrapper_status.get("state") or "").strip().lower() if wrapper_status else ""
+
     worker_cycle_id = str(worker_status.get("cycle_id") or worker_status.get("scrape_id") or "") if worker_status else ""
     worker_matches_latest = worker_cycle_id == cycle_id
 
     parallel_cycle_id = str(parallel_status.get("cycle_id") or "") if parallel_status else ""
     parallel_matches_latest = parallel_cycle_id == cycle_id
+
+    if wrapper_matches_latest and wrapper_state in {"completed", "failed"}:
+        return {
+            "cycle_id": cycle_id,
+            "state": wrapper_status.get("state"),
+            "phase": wrapper_status.get("phase") or "aggregate_wrapper",
+            "overall_query_total": wrapper_status.get("overall_query_total"),
+            "overall_query_completed": wrapper_status.get("overall_query_completed"),
+            "total_rows_accumulated": wrapper_status.get("total_rows_accumulated") or latest_cycle.get("offer_rows"),
+            "completed_at_utc": wrapper_status.get("completed_at_utc") or latest_cycle.get("cycle_completed_at_utc"),
+            "selected_dates": wrapper_status.get("selected_dates"),
+            "matches_latest_cycle": True,
+            "status_source": "wrapper_cycle_state",
+            "aggregate_airline_count": wrapper_status.get("aggregate_airline_count"),
+            "aggregate_failed_count": wrapper_status.get("aggregate_failed_count"),
+            "duration_sec": wrapper_status.get("duration_sec"),
+        }
 
     if parallel_matches_latest:
         selected_dates = worker_status.get("selected_dates") if worker_matches_latest and worker_status else None
@@ -821,11 +852,13 @@ def get_cycle_health(session: Session | None) -> dict[str, Any]:
         stale = cycle_age_minutes > 180
 
     coverage_pct = round((len(observed_set) / len(configured_set) * 100.0), 2) if configured_set else 0.0
+    wrapper_status = _load_latest_cycle_wrapper_status()
     worker_status = _load_latest_run_status()
     parallel_status = _load_latest_parallel_status()
     run_status = _build_cycle_run_status(
         cycle_id=cycle_id,
         latest_cycle=latest_cycle,
+        wrapper_status=wrapper_status,
         worker_status=worker_status,
         parallel_status=parallel_status,
     )
