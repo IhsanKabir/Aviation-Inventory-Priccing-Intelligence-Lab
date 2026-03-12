@@ -176,13 +176,160 @@ def _db_connection_target(root: Path) -> tuple[str, int]:
     return host, port
 
 
-def _db_reachable(root: Path, timeout_seconds: float = 2.0) -> tuple[bool, str, str, int]:
-    host, port = _db_connection_target(root)
+def _db_local_host(host: str) -> bool:
+    return str(host or "").strip().lower() in {"", ".", "localhost", "127.0.0.1", "::1"}
+
+
+def _db_port_reachable(host: str, port: int, timeout_seconds: float = 2.0) -> tuple[bool, str]:
     try:
         with socket.create_connection((host, port), timeout=timeout_seconds):
-            return True, "db_reachable", host, port
+            return True, "db_reachable"
     except OSError as exc:
-        return False, f"db_unreachable:{exc}", host, port
+        return False, f"db_unreachable:{exc}"
+
+
+def _powershell_json(command: str):
+    try:
+        raw = subprocess.check_output(
+            ["powershell.exe", "-NoProfile", "-Command", command],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def _candidate_postgres_service_names(root: Path) -> list[str]:
+    env = _read_env_file(root / ".env")
+    raw_names = [
+        env.get("POSTGRES_SERVICE_NAME"),
+        os.getenv("POSTGRES_SERVICE_NAME"),
+        env.get("POSTGRES_WINDOWS_SERVICE_NAME"),
+        os.getenv("POSTGRES_WINDOWS_SERVICE_NAME"),
+        "postgresql-x64-18",
+    ]
+    seen: set[str] = set()
+    names: list[str] = []
+    for raw in raw_names:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _discover_windows_postgres_service(root: Path) -> dict:
+    candidates = _candidate_postgres_service_names(root)
+    for candidate in candidates:
+        data = _powershell_json(
+            f"$s=Get-Service -Name '{candidate}' -ErrorAction SilentlyContinue | "
+            "Select-Object Name,Status; $s | ConvertTo-Json -Compress"
+        )
+        if isinstance(data, dict) and data.get("Name"):
+            return {"name": str(data.get("Name")), "status": str(data.get("Status") or "")}
+    data = _powershell_json(
+        "$s=Get-Service -Name 'postgresql*' -ErrorAction SilentlyContinue | "
+        "Select-Object Name,Status; $s | ConvertTo-Json -Compress"
+    )
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict) or not item.get("Name"):
+                continue
+            if str(item.get("Status") or "").strip().lower() == "running":
+                return {"name": str(item.get("Name")), "status": str(item.get("Status") or "")}
+        first = next((item for item in data if isinstance(item, dict) and item.get("Name")), None)
+        if first:
+            return {"name": str(first.get("Name")), "status": str(first.get("Status") or "")}
+    if isinstance(data, dict) and data.get("Name"):
+        return {"name": str(data.get("Name")), "status": str(data.get("Status") or "")}
+    return {}
+
+
+def _attempt_windows_postgres_restart(root: Path) -> dict:
+    service = _discover_windows_postgres_service(root)
+    service_name = str(service.get("name") or "")
+    service_status_before = str(service.get("status") or "")
+    payload = {
+        "attempted": False,
+        "succeeded": False,
+        "failed": False,
+        "service_name": service_name or None,
+        "service_status_before": service_status_before or None,
+        "service_status_after": None,
+        "detail": "restart_not_attempted",
+    }
+    if not service_name:
+        payload["failed"] = True
+        payload["detail"] = "service_not_found"
+        return payload
+    if service_status_before.strip().lower() == "running":
+        payload["detail"] = "service_already_running"
+        payload["service_status_after"] = service_status_before or "Running"
+        return payload
+    payload["attempted"] = True
+    restart = _powershell_json(
+        f"try {{ Start-Service -Name '{service_name}' -ErrorAction Stop; Start-Sleep -Seconds 3; "
+        f"$s=Get-Service -Name '{service_name}' -ErrorAction Stop | Select-Object Name,Status; "
+        "$r=[pscustomobject]@{ok=$true;name=$s.Name;status=$s.Status;detail='start_service_ok'} } "
+        "catch { $r=[pscustomobject]@{ok=$false;name=$null;status=$null;detail=$_.Exception.Message} }; "
+        "$r | ConvertTo-Json -Compress"
+    )
+    if isinstance(restart, dict):
+        payload["service_status_after"] = restart.get("status")
+        payload["detail"] = str(restart.get("detail") or payload["detail"])
+        payload["succeeded"] = bool(restart.get("ok")) and str(restart.get("status") or "").strip().lower() == "running"
+    else:
+        payload["detail"] = "restart_command_failed"
+    payload["failed"] = not payload["succeeded"]
+    return payload
+
+
+def _db_health_check(root: Path, timeout_seconds: float = 2.0) -> dict:
+    host, port = _db_connection_target(root)
+    ok, reason = _db_port_reachable(host, port, timeout_seconds=timeout_seconds)
+    payload = {
+        "ok": ok,
+        "reason": reason,
+        "host": host,
+        "port": port,
+        "restart_attempted": False,
+        "restart_succeeded": False,
+        "restart_failed": False,
+        "service_name": None,
+        "service_status_before": None,
+        "service_status_after": None,
+        "restart_detail": None,
+    }
+    if ok or os.name != "nt" or not _db_local_host(host):
+        return payload
+    restart = _attempt_windows_postgres_restart(root)
+    payload.update(
+        {
+            "restart_attempted": bool(restart.get("attempted")),
+            "restart_succeeded": bool(restart.get("succeeded")),
+            "restart_failed": bool(restart.get("failed")),
+            "service_name": restart.get("service_name"),
+            "service_status_before": restart.get("service_status_before"),
+            "service_status_after": restart.get("service_status_after"),
+            "restart_detail": restart.get("detail"),
+        }
+    )
+    if payload["restart_succeeded"]:
+        ok_after, reason_after = _db_port_reachable(host, port, timeout_seconds=timeout_seconds)
+        payload["ok"] = ok_after
+        payload["reason"] = "db_reachable_after_restart" if ok_after else reason_after
+        if not ok_after:
+            payload["restart_failed"] = True
+    else:
+        payload["reason"] = f"{reason};restart_failed:{payload['restart_detail'] or 'unknown'}"
+    return payload
 
 
 def _file_age_minutes(path: Path) -> float | None:
@@ -570,8 +717,8 @@ def _handle_preflight(args, root: Path, reports_dir: Path, status_file: Path, st
     heartbeat = _read_json(status_file)
     parallel_file = reports_dir / "scrape_parallel_latest.json"
     parallel_status = _read_json(parallel_file)
-    db_ok, db_reason, db_host, db_port = _db_reachable(root)
-    db_check = {"ok": db_ok, "reason": db_reason, "host": db_host, "port": db_port}
+    db_check = _db_health_check(root)
+    db_ok = bool(db_check.get("ok"))
     if lock_file.exists():
         cleared, reason = _try_remove_stale_lock(lock_file, active, heartbeat, args)
         if not cleared:
@@ -749,8 +896,8 @@ def _handle_recover(args, root: Path, reports_dir: Path, status_file: Path, stat
     state = _read_json(state_file)
     parallel_file = reports_dir / "scrape_parallel_latest.json"
     parallel_status = _read_json(parallel_file)
-    db_ok, db_reason, db_host, db_port = _db_reachable(root)
-    db_check = {"ok": db_ok, "reason": db_reason, "host": db_host, "port": db_port}
+    db_check = _db_health_check(root)
+    db_ok = bool(db_check.get("ok"))
 
     if active:
         payload = _build_status(
@@ -952,8 +1099,8 @@ def _handle_guarded_run(args, root: Path, reports_dir: Path, status_file: Path, 
     heartbeat = _read_json(status_file)
     parallel_file = reports_dir / "scrape_parallel_latest.json"
     parallel_status = _read_json(parallel_file)
-    db_ok, db_reason, db_host, db_port = _db_reachable(root)
-    db_check = {"ok": db_ok, "reason": db_reason, "host": db_host, "port": db_port}
+    db_check = _db_health_check(root)
+    db_ok = bool(db_check.get("ok"))
     if lock_file.exists():
         cleared, reason = _try_remove_stale_lock(lock_file, active, heartbeat, args)
         if not cleared:
