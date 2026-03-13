@@ -2,6 +2,18 @@
 
 Multi-airline fare, inventory, OTA benchmarking, reporting, and forecasting platform for thesis-grade aviation intelligence work.
 
+## Why This Repository Is Strong
+
+This repository is an end-to-end airline intelligence pipeline, from data collection and normalization to reporting, forecasting, API delivery, and hosted analytics.
+
+It is built around:
+
+1. Clear architecture
+2. Modular code
+3. Reproducibility
+4. Deployment capability
+5. Documentation
+
 ## What This Repository Does
 
 This project captures flight offer data from airline-direct and OTA channels, stores normalized cycle snapshots in local PostgreSQL for operational collection/training, generates operational Excel workbooks, and publishes curated analytics plus ML/DL outputs into BigQuery for hosted reads and BI.
