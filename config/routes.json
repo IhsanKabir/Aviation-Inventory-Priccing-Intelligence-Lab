@@ -1496,6 +1496,22 @@
     ]
   },
   {
+    "airline": "G9",
+    "origin": "DAC",
+    "destination": "JED",
+    "cabins": [
+      "Economy"
+    ]
+  },
+  {
+    "airline": "G9",
+    "origin": "JED",
+    "destination": "DAC",
+    "cabins": [
+      "Economy"
+    ]
+  },
+  {
     "airline": "MH",
     "origin": "DAC",
     "destination": "KUL",

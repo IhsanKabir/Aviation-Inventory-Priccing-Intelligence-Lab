@@ -53,6 +53,7 @@ def parse_args():
         help="Browser channel. chrome/msedge often works better for real-session capture.",
     )
     p.add_argument("--user-data-dir", default="", help="Persistent profile dir (recommended)")
+    p.add_argument("--proxy-server", default="", help="Proxy URL, e.g. http://host:port or socks5://host:port")
     p.add_argument("--headless", action="store_true", help="Run headless")
     p.add_argument("--non-interactive", action="store_true", help="Do not wait for manual ENTER")
     p.add_argument("--keep-open", action="store_true", help="Pause before closing browser in interactive mode")
@@ -279,6 +280,9 @@ def main():
         launch_kwargs: Dict[str, Any] = {"headless": bool(args.headless)}
         if args.browser_channel != "chromium":
             launch_kwargs["channel"] = args.browser_channel
+        proxy_cfg = {"server": args.proxy_server} if args.proxy_server else None
+        if proxy_cfg:
+            launch_kwargs["proxy"] = proxy_cfg
         if args.user_data_dir:
             context = p.chromium.launch_persistent_context(
                 user_data_dir=args.user_data_dir,
@@ -286,7 +290,7 @@ def main():
             )
         else:
             browser = p.chromium.launch(**launch_kwargs)
-            context = browser.new_context()
+            context = browser.new_context(proxy=proxy_cfg)
 
         context.on("request", _on_request)
         page = context.pages[0] if context.pages else context.new_page()

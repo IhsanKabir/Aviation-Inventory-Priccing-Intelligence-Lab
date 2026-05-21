@@ -171,7 +171,16 @@ Interpretation:
 
 ## Scheduler Timing
 
-Main timing config lives in `config/schedule.json` under `scheduler_timing`.
+Main timing config lives in `config/schedule.json` under `scheduler_timing`. Scheduler start times are in UTC/local time configured in that file.
+
+Current scheduling window:
+
+- `ingestion`: starts at **01:00** (changed from 12:00 on 2026-05-21)
+- `training_enrichment`: starts at **01:30**
+- `training_deep`: starts at **02:00** (Sunday only)
+- `bigquery_sync`: starts at **03:30**
+
+Scheduler timing scope:
 
 - `global`: normal full ingestion timing.
 - `sources`: source/supplier timing for all airlines whose primary module is that source.
@@ -560,6 +569,40 @@ Route monitor comparison basis check:
 - `generate_route_flight_fare_monitor.py` now warns if current/previous compared cycles have mismatched passenger mix (`ADT/CHD/INF`).
 - If warning appears, regenerate using a like-for-like accumulation pair for valid change analysis.
 
+## Training Pipeline (Inventory State Models)
+
+The training pipeline builds and persists two-stage production models to `output/models/`.
+
+Manual training run:
+
+```powershell
+.\.venv\Scripts\python.exe run_training.py
+```
+
+Options:
+
+```powershell
+# Reuse existing CSV; skip dataset build
+.\.venv\Scripts\python.exe run_training.py --skip-dataset-build
+
+# Change lookback window
+.\.venv\Scripts\python.exe run_training.py --lookback-days 60
+
+# Change Stage B model architecture
+.\.venv\Scripts\python.exe run_training.py --stage-b-model rf
+
+# Evaluate only; do not persist models
+.\.venv\Scripts\python.exe run_training.py --no-save-models
+```
+
+Output artifacts (saved to `output/models/`):
+
+- `stage_a_latest.joblib` — first-stage classifier for movement probability
+- `stage_b_latest.joblib` — second-stage regressor for fare delta estimation
+- `model_meta_latest.json` — model metadata (feature set, training date, metrics)
+
+The `run_pipeline.py` automatically loads these models and applies them when `--trip-plan-mode` is `training` or `deep`.
+
 ## ML/DL Forecast Workflow (Daily)
 
 Goal:
@@ -842,6 +885,18 @@ DAC→JED, DAC→MCT, DAC→DXB, DAC→SHJ, DAC→RUH, DAC→KWI, DAC→BAH, DAC
 
 ---
 
+## G9 (Air Arabia) Operational Notes
+
+Air Arabia API recently changed (2026-05-21):
+
+- The `description` field is now a string instead of a dict structure
+- Via-airport is now extracted from the `segmentCode` field instead of description.via_airport
+- DAC↔JED routes have been added to `config/routes.json`
+
+If you see via-airport extraction failures in Air Arabia runs, verify that `modules/airarabia.py` is up-to-date.
+
+---
+
 ## OV (SalamAir) Operational Notes
 
 SalamAir has two capture modes — choose based on environment:
@@ -904,6 +959,32 @@ Capture/session controls:
 - ShareTrip-backed scheduled concurrency defaults to `PARALLEL_SHARETRIP_MAX_WORKERS=1`.
 - To temporarily remove any supplier/source from a run, edit `config/source_switches.json` and set that source's `"enabled": false`.
 - The source switch file disables primary airline modules and nested fallback suppliers. `SHARETRIP_ENABLED=false` still works as a legacy ShareTrip-only override.
+
+### Source Failure Tracking and Auto-Flagging
+
+The source failure tracker monitors consecutive zero-row pipeline runs per source. After **3 consecutive failures**, the source is automatically disabled:
+
+1. Pipeline logs zero-row result for a source
+2. Tracker increments the failure counter
+3. After 3 failures, source is auto-disabled in `config/source_switches.json` with `auto_flagged=true`
+4. Operator must manually re-enable: set `enabled: true` and `auto_flagged: false`
+
+View auto-flagged sources:
+
+```powershell
+Get-Content config\source_switches.json | Select-String -Pattern 'auto_flagged.*true' -Context 2
+```
+
+Manual recovery:
+
+```powershell
+# Edit config/source_switches.json
+# Find sources with "auto_flagged": true
+# Fix the underlying issue (rate limit, session expiry, API change, etc.)
+# Set "enabled": true and remove "auto_flagged": true
+# Run preflight to validate:
+.\.venv\Scripts\python.exe tools\pre_flight_session_check.py --dry-run
+```
 
 Manual session checks:
 

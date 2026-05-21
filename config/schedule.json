@@ -4,7 +4,7 @@
   "auto_run_interval_hours": 24,
   "task_windows": {
     "ingestion": {
-      "start_time": "12:00",
+      "start_time": "01:00",
       "repeat_minutes": 1440
     },
     "training_enrichment": {
@@ -20,11 +20,11 @@
     }
   },
   "scheduler_timing": {
-    "enabled": true,
+    "enabled": false,
     "timezone": "local",
     "global": {
-      "enabled": true,
-      "start_time": "12:00",
+      "enabled": false,
+      "start_time": "01:00",
       "repeat_minutes": 1440,
       "completion_buffer_minutes": 90
     },

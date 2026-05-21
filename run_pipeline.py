@@ -14,6 +14,7 @@ from pathlib import Path
 
 from sqlalchemy import create_engine, text
 
+from core.source_failure_tracker import log_flagged_sources, record_pipeline_result
 from core.source_switches import DEFAULT_SOURCE_SWITCHES_FILE, load_source_switches, source_switch_status
 from db import DATABASE_URL as DEFAULT_DATABASE_URL
 
@@ -225,6 +226,24 @@ def parse_args():
         choices=["min_price_bdt", "avg_seat_available", "offers_count", "soldout_rate"],
         default="min_price_bdt",
     )
+
+    # inventory-state model training
+    parser.add_argument(
+        "--run-training",
+        dest="run_training",
+        action="store_true",
+        help="After reports, build the inventory-state dataset and retrain/persist the two-stage model.",
+    )
+    parser.add_argument(
+        "--skip-training",
+        dest="run_training",
+        action="store_false",
+        help="Skip the training step (default).",
+    )
+    parser.set_defaults(run_training=False)
+    parser.add_argument("--training-lookback-days", type=int, default=30)
+    parser.add_argument("--training-models-dir", default="output/models")
+    parser.add_argument("--training-stage-b-model", choices=["ridge", "rf"], default="ridge")
 
     # alert quality
     parser.add_argument("--run-alert-eval", action="store_true")
@@ -1561,6 +1580,7 @@ def main():
             execution_plan.get("current_phase"),
             execution_plan.get("ultimate_priority_goal"),
         )
+    log_flagged_sources(args.source_switches_file or DEFAULT_SOURCE_SWITCHES_FILE)
     before_count = _count_column_events(args.db_url)
 
     pipeline_rc = 0
@@ -1699,6 +1719,23 @@ def main():
             if args.fail_fast:
                 return pipeline_rc
 
+    # Auto-enable training for training/deep modes unless explicitly skipped.
+    effective_run_training = args.run_training or args.trip_plan_mode in ("training", "deep")
+    if effective_run_training:
+        training_cmd = [
+            args.python_exe,
+            str(REPO_ROOT / "run_training.py"),
+            "--lookback-days", str(args.training_lookback_days),
+            "--models-dir", str(args.training_models_dir),
+            "--stage-b-model", str(args.training_stage_b_model),
+            "--output-dir", str(args.report_output_dir),
+        ]
+        if args.db_url:
+            training_cmd += ["--db-url", args.db_url]
+        rc = _run_step("training", training_cmd)
+        if rc != 0:
+            LOG.warning("Training step failed (rc=%s) — pipeline result preserved.", rc)
+
     if pipeline_rc == 0 and _extraction_gate_allows_bigquery(extraction_gate_status) and not args.skip_bigquery_sync:
         if _bigquery_sync_is_configured(args):
             start_date, end_date = _bigquery_sync_window(args)
@@ -1755,6 +1792,11 @@ def main():
         )
         if coverage.get("missing_airlines"):
             LOG.info("all_airline_coverage_missing=%s", ",".join(coverage.get("missing_airlines")))
+    record_pipeline_result(
+        missing_airlines=list(coverage.get("missing_airlines") or []),
+        expected_airlines=list(coverage.get("expected_airlines") or []),
+        switches_file=args.source_switches_file or DEFAULT_SOURCE_SWITCHES_FILE,
+    )
     execution_plan_status_path = _write_execution_plan_status(
         args.report_output_dir,
         execution_plan,

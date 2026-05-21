@@ -56,6 +56,7 @@ As of the 2026-04-27 cleanup pass:
 
 - `run_pipeline.py`: main orchestrator for accumulation, reports, prediction, intelligence hub, alert evaluation, and BigQuery sync.
 - `run_all.py`: main airline/OTA collection runner that normalizes offers and writes PostgreSQL cycle snapshots.
+- `run_training.py`: chains dataset building and model training; saves production models to `output/models/`.
 - `generate_reports.py`: standard reporting pack generator.
 - `generate_route_flight_fare_monitor.py`: specialized route-flight fare monitor workbook generator, including optional macro-enabled `.xlsm`.
 - `predict_next_day.py`: forecasting and backtest pipeline for event and numeric targets.
@@ -94,13 +95,16 @@ As of the 2026-04-27 cleanup pass:
 - Excel output remains important for delivery and exports.
 - The route monitor workbook is operationally important but should not become the long-term interactive UI.
 
-### Forecasting
+### Forecasting and Model Training
 
 - Prediction priorities are price-change prediction first, availability prediction second.
 - `predict_next_day.py` supports event and numeric targets.
 - ML/DL support includes optional CatBoost, LightGBM, and MLP pathways.
 - Current improvements include holiday features, booking curve features, route characteristics, confidence bands, SHAP/explainability output, imputation, transfer learning, and prediction monitoring modules.
 - Evaluation intent includes directional quality, magnitude error, event precision/recall, calibration, and operational value.
+- `run_training.py` orchestrates dataset building and two-stage model training; saves production models to `output/models/` with `.joblib` artifacts and metadata.
+- `core/inventory_state_scorer.py` loads persisted models and applies them in the forecasting pipeline.
+- `core/source_failure_tracker.py` tracks consecutive zero-row pipeline runs per source; auto-disables after 3 failures and sets `auto_flagged=true` in `config/source_switches.json`.
 
 ### Warehouse and Hosted Reads
 
@@ -168,7 +172,7 @@ Route counts from `config/routes.json` on 2026-04-26:
 | CZ | 2 |
 | EK | 2 |
 | FZ | 2 |
-| G9 | 2 |
+| G9 | 4 |
 | MH | 2 |
 | OD | 2 |
 | OV | 2 |
@@ -373,7 +377,8 @@ $env:SHARETRIP_ENABLED="false"
 - Q2/Maldivian and some other sources are session/UI-state sensitive.
 - AMYBD/GoZayaan sessions can expire silently; preflight contracts now exist, but route/date-level validity is still proven by extraction attempts.
 - OV/SalamAir validation and route expansion remain noted in daily tracking.
-- G9/Air Arabia direct connector/HAR workflow was noted as newly upgraded around 2026-04-09.
+- G9/Air Arabia API changed on 2026-05-21 (description field now string, via-airport from segmentCode); routes DAC↔JED added.
+- Source failure tracker auto-disables broken sources after 3 consecutive zero-row runs; manual re-enable required.
 - Accumulation runtime is the main bottleneck; parallel execution should be conservative and family-aware.
 - Some docs mention pending full integration tests that require environment setup.
 - The web/API surface is in active transition from Excel-first to hosted read-first.
@@ -417,6 +422,7 @@ $env:SHARETRIP_ENABLED="false"
 | 2026-04-27 | Applied live BigQuery cost-control settings. | Enabled storage metrics for `region-asia-south1`, applied retention in BigQuery console, and verified `partition_retention_warnings=0`. Current largest table remains `fact_change_event`, now bounded by retention. |
 | 2026-04-27 | Added extraction reliability telemetry and gates. | Added `extraction_attempts`, per-query health classification, latest JSON/MD/CSV health reports, connector health contracts, preflight tool, stale-capture rejection, throttled query launch, one retry pass for retryable source failures, worker-scoped output aggregation, protected-source manual queues for `Q2`, `G9`, `OV`, `BS`, and `2A`, stale-date filtering for manual queues, ShareTrip kill-switch support, and BigQuery skip-on-`FAIL` behavior. |
 | 2026-04-30 | Tier 1 reliability hardening pass landed (5 items). | (1) `core/atomic_write.py` adds `atomic_write_json` / `atomic_write_text` helpers; HAR-import + session-refresh tools rerouted through them. (2) `core/extraction_health.py` formalizes the closed `ALL_ERROR_CLASSES` vocabulary with `is_known_error_class` helper and a `classify_attempt` docstring listing every emitted value. (3) `modules/gozayaan.py` honours `GOZAYAAN_INTER_QUERY_SLEEP` (default 3.0s) at the top of every `fetch_flights_for_airline` call; `.env.example` documents it. (4) `run_pipeline.py` filters `--retry-missing-airlines` against `source_switches.json` runtime status. (5) `tools/audit_airline_source_plan.py --strict` exits 3 on empty effective chains. Behaviour-preserving for cycles that don't touch the new flags. Verified by `pytest -q` (146 passed) and `tools/ci_checks.py` (`ci_ok=True`). |
+| 2026-05-21 | Training pipeline now persists production models to disk. | Added `run_training.py` orchestrator, `core/inventory_state_scorer.py` model loader, `core/source_failure_tracker.py` for auto-disabling broken sources. `tools/train_inventory_state_baseline.py` saves stage_a/stage_b `.joblib` artifacts and metadata to `output/models/`. Scheduler start time changed from 12:00 to 01:00. Air Arabia (G9) API change: description now string, via-airport extracted from segmentCode. Added G9 DAC↔JED routes. |
 
 ## How Future Chats Should Start
 

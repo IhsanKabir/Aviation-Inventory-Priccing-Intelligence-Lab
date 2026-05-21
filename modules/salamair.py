@@ -25,7 +25,8 @@ ENV_SOURCE_MODE = "SALAMAIR_SOURCE_MODE"
 ENV_BROWSER_CAPTURE_AUTO = "SALAMAIR_BROWSER_CAPTURE_AUTO"
 ENV_BROWSER_CAPTURE_CMD = "SALAMAIR_BROWSER_CAPTURE_CMD"
 ENV_BROWSER_CAPTURE_TIMEOUT_SEC = "SALAMAIR_BROWSER_CAPTURE_TIMEOUT_SEC"
-FARES_URL_TOKEN = "/api/flights/flightFares"
+# SalamAir migrated from POST /api/flights/flightFares to GET /api/flights?TripType=...
+FARES_URL_TOKEN = "api.salamair.com/api/flights?"
 CONFIRM_URL_TOKEN = "/api/flights/confirm"
 
 
@@ -367,8 +368,7 @@ def _default_browser_capture_command(*, origin: str, destination: str, date: str
         f'--destination "{str(destination).upper().strip()}" '
         f'--date "{str(date).strip()}" '
         f'--cabin "{str(cabin or "Economy").strip()}" '
-        f'--adt {int(max(1, adt or 1))} --chd {int(max(0, chd or 0))} --inf {int(max(0, inf or 0))} '
-        f'--headless'
+        f'--adt {int(max(1, adt or 1))} --chd {int(max(0, chd or 0))} --inf {int(max(0, inf or 0))}'
     )
 
 

@@ -209,7 +209,13 @@ def parse_fare_response(payload: Any, *, requested_cabin: str = "Economy", adt: 
                 continue
             via_airports: List[str] = []
             for segment in segments[:-1]:
-                airport = str((segment.get("description") or {}).get("destinationAirportCode") or "").upper().strip()
+                desc = segment.get("description")
+                if isinstance(desc, dict):
+                    airport = str(desc.get("destinationAirportCode") or "").upper().strip()
+                else:
+                    seg_code = str(segment.get("segmentCode") or "")
+                    parts = seg_code.split("/")
+                    airport = str(parts[-1] if len(parts) >= 2 else "").upper().strip()
                 if airport and airport not in {origin, destination} and airport not in via_airports:
                     via_airports.append(airport)
             fare_classes = option.get("availableFareClasses") or []

@@ -4,6 +4,7 @@ import math
 from datetime import datetime
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.compose import ColumnTransformer
@@ -29,6 +30,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 DEFAULT_OUTPUT_DIR = Path("output/reports")
 DEFAULT_INPUT_CSV = DEFAULT_OUTPUT_DIR / "inventory_state_v2_latest.csv"
+DEFAULT_MODELS_DIR = Path("output/models")
 ROUTE_ENGINEERED_FEATURE_MARKERS = (
     "dac_spd_",
     "dep_tod_bin",
@@ -133,6 +135,17 @@ def _parse_args() -> argparse.Namespace:
         choices=["none", "drop_route_engineered"],
         default="none",
         help="Optional feature ablation for controlled A/B experiments",
+    )
+    p.add_argument(
+        "--models-dir",
+        default=str(DEFAULT_MODELS_DIR),
+        help="Directory to write production model artifacts (stage_a/stage_b .joblib + metadata JSON)",
+    )
+    p.add_argument(
+        "--no-save-models",
+        action="store_true",
+        default=False,
+        help="Skip saving production model artifacts (evaluation-only run)",
     )
     return p.parse_args()
 
@@ -1583,6 +1596,137 @@ def _write_outputs(summary: dict, out_dir: Path, tz_mode: str) -> dict:
     }
 
 
+def _fit_production_models(
+    df: pd.DataFrame,
+    X: pd.DataFrame,
+    meta: dict,
+    args: argparse.Namespace,
+    eval_result: dict,
+) -> tuple | None:
+    """Fit Stage A + Stage B on ALL available data for production inference.
+
+    Returns (stage_a, stage_b, model_meta) or None when data is insufficient.
+    Trains on the full dataset (no held-out split) so the persisted model has
+    maximum coverage before being deployed for scoring.
+    """
+    target_delta = "y_next_search_lowest_fare_delta"
+    d = df[df[target_delta].notna()].copy()
+    y_delta = pd.to_numeric(d[target_delta], errors="coerce")
+    d = d[y_delta.notna()].copy()
+    y_delta = y_delta.loc[d.index]
+    if len(d) < 50:
+        return None
+
+    Xd = X.loc[d.index]
+    min_move_delta = float(max(args.min_move_delta or 0.0, 0.0))
+    if min_move_delta > 0:
+        y_move = (np.abs(y_delta) >= min_move_delta).astype(int)
+    else:
+        y_move = (y_delta != 0).astype(int)
+
+    if y_move.nunique() < 2:
+        return None
+
+    pre_a = _build_preprocessor(meta)
+    stage_a_calibration = str(getattr(args, "stage_a_calibration", "none") or "none").lower()
+    stage_a_calibration_cv = int(max(getattr(args, "stage_a_calibration_cv", 3) or 3, 2))
+    stage_a_base = Pipeline(steps=[
+        ("pre", pre_a),
+        ("model", RandomForestClassifier(
+            n_estimators=300,
+            random_state=args.random_state,
+            class_weight="balanced_subsample",
+            n_jobs=-1,
+            min_samples_leaf=2,
+        )),
+    ])
+    if stage_a_calibration != "none":
+        stage_a = CalibratedClassifierCV(
+            estimator=stage_a_base, method=stage_a_calibration, cv=stage_a_calibration_cv,
+        )
+    else:
+        stage_a = stage_a_base
+    stage_a.fit(Xd, y_move)
+
+    moved_idx = y_move[y_move == 1].index
+    min_stage_b_moves = int(max(getattr(args, "min_stage_b_moves", 20) or 20, 1))
+    if len(moved_idx) < min_stage_b_moves:
+        return None
+
+    pre_b = _build_preprocessor(meta)
+    stage_b_model_choice = str(getattr(args, "stage_b_model", "ridge") or "ridge").lower()
+    stage_b_estimator = (
+        RandomForestRegressor(n_estimators=400, random_state=args.random_state, n_jobs=-1, min_samples_leaf=2)
+        if stage_b_model_choice == "rf"
+        else Ridge(alpha=1.0, random_state=args.random_state)
+    )
+    stage_b = Pipeline(steps=[("pre", pre_b), ("model", stage_b_estimator)])
+    stage_b.fit(Xd.loc[moved_idx], y_delta.loc[moved_idx])
+
+    # Pick best threshold from the evaluation run (prefer MAE-optimal; fall back to 0.5)
+    best_threshold = 0.5
+    try:
+        tuning = eval_result.get("combined_delta_prediction", {}).get("threshold_tuning", {})
+        by_mae = tuning.get("best_threshold_beating_zero_baseline_by_mae") or {}
+        by_rmse = tuning.get("best_threshold_beating_zero_baseline_by_rmse") or {}
+        candidate = by_mae or by_rmse
+        if candidate:
+            best_threshold = float(candidate.get("threshold", 0.5))
+    except Exception:
+        pass
+
+    model_meta: dict = {
+        "trained_at_utc": datetime.utcnow().isoformat() + "Z",
+        "rows_total": int(len(d)),
+        "move_rate": float(y_move.mean()),
+        "feature_cols": list(meta["feature_cols"]),
+        "numeric_cols": list(meta["numeric_cols"]),
+        "categorical_cols": list(meta["categorical_cols"]),
+        "stage_b_model": stage_b_model_choice,
+        "stage_a_calibration": stage_a_calibration,
+        "min_move_delta": float(min_move_delta),
+        "best_threshold": best_threshold,
+        "feature_ablation": str(meta.get("feature_ablation", "none")),
+    }
+    return stage_a, stage_b, model_meta
+
+
+def _save_production_models(
+    stage_a: object,
+    stage_b: object,
+    model_meta: dict,
+    models_dir: Path,
+    ts_token: str,
+) -> dict:
+    """Persist stage_a, stage_b, and metadata to models_dir."""
+    models_dir.mkdir(parents=True, exist_ok=True)
+
+    stage_a_latest = models_dir / "stage_a_latest.joblib"
+    stage_b_latest = models_dir / "stage_b_latest.joblib"
+    meta_latest = models_dir / "model_meta_latest.json"
+
+    stage_a_ts = models_dir / f"stage_a_{ts_token}.joblib"
+    stage_b_ts = models_dir / f"stage_b_{ts_token}.joblib"
+    meta_ts = models_dir / f"model_meta_{ts_token}.json"
+
+    joblib.dump(stage_a, stage_a_latest)
+    joblib.dump(stage_b, stage_b_latest)
+    joblib.dump(stage_a, stage_a_ts)
+    joblib.dump(stage_b, stage_b_ts)
+
+    meta_json = json.dumps(model_meta, indent=2)
+    meta_latest.write_text(meta_json, encoding="utf-8")
+    meta_ts.write_text(meta_json, encoding="utf-8")
+
+    return {
+        "stage_a_latest": str(stage_a_latest),
+        "stage_b_latest": str(stage_b_latest),
+        "meta_latest": str(meta_latest),
+        "stage_a_timestamped": str(stage_a_ts),
+        "stage_b_timestamped": str(stage_b_ts),
+    }
+
+
 def main() -> None:
     args = _parse_args()
     input_csv = Path(args.input_csv)
@@ -1665,6 +1809,24 @@ def main() -> None:
     Path(paths["latest_json"]).write_text(json.dumps(summary, indent=2), encoding="utf-8")
     Path(paths["json"]).write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
+    # Fit on full dataset and persist production artifacts unless explicitly skipped.
+    production_model_info: dict = {"saved": False}
+    if not args.no_save_models and not two_stage_regression.get("skipped"):
+        models_dir = Path(args.models_dir)
+        fit_result = _fit_production_models(df, X, meta, args, two_stage_regression)
+        if fit_result is not None:
+            stage_a, stage_b, model_meta = fit_result
+            ts = _timestamp_token(args.timestamp_tz)
+            saved = _save_production_models(stage_a, stage_b, model_meta, models_dir, ts)
+            production_model_info = {"saved": True, "models_dir": str(models_dir), "artifacts": saved, **model_meta}
+            print(f"production_models_saved -> {saved['stage_a_latest']}, {saved['stage_b_latest']}")
+        else:
+            production_model_info = {"saved": False, "reason": "insufficient data or single-class move target"}
+
+    summary["production_model"] = production_model_info
+    Path(paths["latest_json"]).write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    Path(paths["json"]).write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
     print(
         "inventory_state_baseline:"
         f" rows={rows_after_filters}"
@@ -1672,6 +1834,7 @@ def main() -> None:
         f" clf={'skipped' if classification.get('skipped') else 'ok'}"
         f" reg={'skipped' if regression.get('skipped') else 'ok'}"
         f" reg2={'skipped' if two_stage_regression.get('skipped') else 'ok'}"
+        f" models={'saved' if production_model_info.get('saved') else 'not_saved'}"
         f" -> {paths['json']}, {paths['md']}"
     )
 
